@@ -99,6 +99,19 @@ export function moveLeftSidebarLeaf(
   return true;
 }
 
+/**
+ * Obsidian's createLeafInParent inserts a bare leaf below a split. A file
+ * explorer in that shape has no native tab header, unlike normal side-pane
+ * file explorers. Wrap only those leaves in a tabs container; other core and
+ * community-plugin leaves retain their existing location and grouping.
+ */
+export function ensureLeftExplorersUseTabs(layout: WorkspaceLayout): boolean {
+  if (!layout.left) {
+    return false;
+  }
+  return wrapBareExplorerLeaves(layout.left);
+}
+
 function findLeaf(node: WorkspaceLayoutNode, leafId: string): LocatedLeaf | null {
   const children = node.children;
   if (!children) {
@@ -144,6 +157,41 @@ function normalizeLeftLayout(layout: WorkspaceLayout): void {
   if (normalized) {
     layout.left = normalized;
   }
+}
+
+function wrapBareExplorerLeaves(node: WorkspaceLayoutNode): boolean {
+  let changed = false;
+  const children = node.children;
+  if (!children) {
+    return false;
+  }
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index];
+    if (node.type !== "tabs" && isExplorerLeaf(child)) {
+      const dimension = child.dimension;
+      children[index] = {
+        id: createLayoutId("tabs"),
+        type: "tabs",
+        children: [child],
+        currentTab: 0,
+        ...(typeof dimension === "number" ? { dimension } : {}),
+      };
+      changed = true;
+      continue;
+    }
+    changed = wrapBareExplorerLeaves(child) || changed;
+  }
+  return changed;
+}
+
+function isExplorerLeaf(node: WorkspaceLayoutNode): boolean {
+  if (node.type !== "leaf") {
+    return false;
+  }
+  const state = node.state;
+  return state !== null
+    && typeof state === "object"
+    && (state as { type?: unknown }).type === "file-explorer";
 }
 
 function normalizeNode(node: WorkspaceLayoutNode, isRoot: boolean): WorkspaceLayoutNode | null {

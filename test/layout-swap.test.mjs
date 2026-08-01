@@ -11,7 +11,7 @@ const result = await esbuild.build({
 });
 const module = { exports: {} };
 new Function("module", "exports", result.outputFiles[0].text)(module, module.exports);
-const { moveLeftSidebarLeaf } = module.exports;
+const { ensureLeftExplorersUseTabs, moveLeftSidebarLeaf } = module.exports;
 
 const leaf = (id, type = "file-explorer") => ({ id, type: "leaf", state: { type } });
 const tabs = (...children) => ({ id: `tabs-${children[0]?.id ?? "empty"}`, type: "tabs", children });
@@ -93,4 +93,17 @@ test("does not mutate layout for invalid or identical leaf ids", () => {
   assert.equal(moveLeftSidebarLeaf(layout, "one", "one", "right"), false);
   assert.equal(moveLeftSidebarLeaf(layout, "one", "missing", "tab"), false);
   assert.equal(JSON.stringify(layout), snapshot);
+});
+
+test("wraps a bare file explorer in tabs without affecting sibling plugin views", () => {
+  const explorer = leaf("explorer");
+  const search = leaf("search", "search");
+  const layout = { left: split(explorer, tabs(search)) };
+
+  assert.equal(ensureLeftExplorersUseTabs(layout), true);
+  assert.equal(layout.left.children[0].type, "tabs");
+  assert.deepEqual(layout.left.children[0].children.map((node) => node.id), ["explorer"]);
+  assert.equal(layout.left.children[1].type, "tabs");
+  assert.deepEqual(layout.left.children[1].children.map((node) => node.id), ["search"]);
+  assert.equal(ensureLeftExplorersUseTabs(layout), false);
 });

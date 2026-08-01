@@ -2,7 +2,12 @@ import { Notice, Plugin, WorkspaceLeaf, WorkspaceSplit } from "obsidian";
 import { VaultCopyService } from "./copy-service";
 import { MoveDiagnostics } from "./diagnostics";
 import { ExplorerTabMoveController, getLeafId, isValidLeftExplorer } from "./explorer-reorder";
-import { moveLeftSidebarLeaf, type DropPlacement, type WorkspaceLayout } from "./layout-swap";
+import {
+  ensureLeftExplorersUseTabs,
+  moveLeftSidebarLeaf,
+  type DropPlacement,
+  type WorkspaceLayout,
+} from "./layout-swap";
 import {
   ExplorerCopyDragController,
   ExplorerHeaderControl,
@@ -32,6 +37,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private refreshTimer: number | null = null;
   private minimumExplorerTimer: number | null = null;
   private isRestoringMinimumExplorer = false;
+  private isNormalizingExplorerTabs = false;
 
   async onload(): Promise<void> {
     this.diagnostics = new MoveDiagnostics(this.app, this.manifest.id);
@@ -127,24 +133,45 @@ export default class FileExplorerSplitPlugin extends Plugin {
   }
 
   private async ensureMinimumExplorer(): Promise<void> {
-    if (this.isRestoringMinimumExplorer || getLeftExplorerLeaves(this.app).length > 0) {
+    if (this.isRestoringMinimumExplorer) {
       return;
     }
-    this.isRestoringMinimumExplorer = true;
+    if (getLeftExplorerLeaves(this.app).length === 0) {
+      this.isRestoringMinimumExplorer = true;
+      try {
+        const leaf = this.app.workspace.createLeafInParent(this.app.workspace.leftSplit as WorkspaceSplit, 0);
+        await leaf.setViewState({
+          type: FILE_EXPLORER_VIEW_TYPE,
+          state: {},
+          active: false,
+        });
+        new Notice("已保留一个左侧文件列表，不能全部关闭。");
+      } catch (error) {
+        console.error("[File Explorer Split] Failed to restore the last explorer", error);
+        new Notice("无法恢复最后一个文件列表。请重新打开文件列表视图。");
+      } finally {
+        this.isRestoringMinimumExplorer = false;
+      }
+    }
+    await this.ensureExplorerTabContainers();
+    this.queueRefresh();
+  }
+
+  private async ensureExplorerTabContainers(): Promise<void> {
+    if (this.isNormalizingExplorerTabs) {
+      return;
+    }
+    const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
+    if (!ensureLeftExplorersUseTabs(layout)) {
+      return;
+    }
+    this.isNormalizingExplorerTabs = true;
     try {
-      const leaf = this.app.workspace.createLeafInParent(this.app.workspace.leftSplit as WorkspaceSplit, 0);
-      await leaf.setViewState({
-        type: FILE_EXPLORER_VIEW_TYPE,
-        state: {},
-        active: false,
-      });
-      new Notice("已保留一个左侧文件列表，不能全部关闭。");
-      this.queueRefresh();
+      await this.app.workspace.changeLayout(layout);
     } catch (error) {
-      console.error("[File Explorer Split] Failed to restore the last explorer", error);
-      new Notice("无法恢复最后一个文件列表。请重新打开文件列表视图。");
+      console.error("[File Explorer Split] Failed to normalize file explorer tab containers", error);
     } finally {
-      this.isRestoringMinimumExplorer = false;
+      this.isNormalizingExplorerTabs = false;
     }
   }
 
