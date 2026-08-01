@@ -27,6 +27,19 @@ export interface NativeExplorerRestoreReport {
   scrollTop: number;
 }
 
+export interface NativeExplorerStateComparison {
+  expectedFolderCount: number;
+  observedFolderCount: number;
+  matchedFolders: number;
+  collapsedMismatches: Array<{ path: string; expected: boolean; observed: boolean }>;
+  missingVisibleFolders: string[];
+  missingBecauseAncestorCollapsed: string[];
+  unexpectedVisibleFolders: string[];
+  expectedScrollTop: number;
+  observedScrollTop: number;
+  scrollTopDelta: number;
+}
+
 export function isNativeExplorer(leaf: WorkspaceLeaf): boolean {
   return leaf.getViewState().type === FILE_EXPLORER_VIEW_TYPE;
 }
@@ -70,6 +83,56 @@ export function captureNativeExplorerState(leaf: WorkspaceLeaf): NativeExplorerS
     ephemeralState: cloneState(leaf.getEphemeralState()),
     folders,
     scrollTop: navigator?.scrollTop ?? 0,
+  };
+}
+
+/**
+ * Compares a captured explorer state with the DOM currently rendered by Obsidian.
+ * A descendant hidden under an expected collapsed ancestor is normal, so it is
+ * reported separately from a folder that should have been visible but is absent.
+ */
+export function compareNativeExplorerState(
+  expected: NativeExplorerStateSnapshot,
+  observed: NativeExplorerStateSnapshot,
+): NativeExplorerStateComparison {
+  const expectedByPath = new Map(expected.folders.map((folder) => [folder.path, folder]));
+  const observedByPath = new Map(observed.folders.map((folder) => [folder.path, folder]));
+  const collapsedMismatches: NativeExplorerStateComparison["collapsedMismatches"] = [];
+  const missingVisibleFolders: string[] = [];
+  const missingBecauseAncestorCollapsed: string[] = [];
+
+  for (const [path, expectedFolder] of expectedByPath) {
+    const observedFolder = observedByPath.get(path);
+    if (observedFolder) {
+      if (expectedFolder.collapsed !== observedFolder.collapsed) {
+        collapsedMismatches.push({
+          path,
+          expected: expectedFolder.collapsed,
+          observed: observedFolder.collapsed,
+        });
+      }
+      continue;
+    }
+    if (hasCollapsedAncestor(path, expectedByPath)) {
+      missingBecauseAncestorCollapsed.push(path);
+    } else {
+      missingVisibleFolders.push(path);
+    }
+  }
+
+  const unexpectedVisibleFolders = [...observedByPath.keys()]
+    .filter((path) => !expectedByPath.has(path));
+  return {
+    expectedFolderCount: expected.folders.length,
+    observedFolderCount: observed.folders.length,
+    matchedFolders: expected.folders.length - missingVisibleFolders.length - missingBecauseAncestorCollapsed.length,
+    collapsedMismatches,
+    missingVisibleFolders,
+    missingBecauseAncestorCollapsed,
+    unexpectedVisibleFolders,
+    expectedScrollTop: expected.scrollTop,
+    observedScrollTop: observed.scrollTop,
+    scrollTopDelta: observed.scrollTop - expected.scrollTop,
   };
 }
 
@@ -136,6 +199,17 @@ function getFolderTitle(folder: HTMLElement): HTMLElement | null {
 function findFolderByPath(container: HTMLElement, path: string): HTMLElement | null {
   return Array.from(container.querySelectorAll<HTMLElement>(".nav-folder"))
     .find((folder) => getFolderTitle(folder)?.dataset.path === path) ?? null;
+}
+
+function hasCollapsedAncestor(path: string, folders: Map<string, FolderDomState>): boolean {
+  const segments = path.split("/");
+  for (let index = 1; index < segments.length; index += 1) {
+    const ancestor = folders.get(segments.slice(0, index).join("/"));
+    if (ancestor?.collapsed) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function cloneState<T>(value: T): T {

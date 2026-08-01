@@ -7,6 +7,7 @@ import {
   ExplorerCopyDragController,
   ExplorerHeaderControl,
   captureNativeExplorerState,
+  compareNativeExplorerState,
   getLeftExplorerLeaves,
   isLeafInLeftSidebar,
   isNativeExplorer,
@@ -234,6 +235,13 @@ export default class FileExplorerSplitPlugin extends Plugin {
           report,
           restoredViewState: movedLeaf.getViewState(),
         });
+        this.logRestoredExplorerState(sourceId, sourceState, movedLeaf, "immediate");
+        window.setTimeout(() => {
+          this.logRestoredExplorerState(sourceId, sourceState, movedLeaf, "after-300ms");
+        }, 300);
+        window.setTimeout(() => {
+          this.logRestoredExplorerState(sourceId, sourceState, movedLeaf, "after-1000ms");
+        }, 1000);
         await this.app.workspace.revealLeaf(movedLeaf);
         this.app.workspace.setActiveLeaf(movedLeaf, { focus: true });
       } else {
@@ -253,5 +261,20 @@ export default class FileExplorerSplitPlugin extends Plugin {
       viewState: leaf.getViewState(),
       ephemeralState: leaf.getEphemeralState(),
     }));
+  }
+
+  private logRestoredExplorerState(
+    sourceId: string,
+    expected: ReturnType<typeof captureNativeExplorerState>,
+    leaf: WorkspaceLeaf,
+    stage: "immediate" | "after-300ms" | "after-1000ms",
+  ): void {
+    const observed = captureNativeExplorerState(leaf);
+    this.diagnostics?.log("move.restore-verification", {
+      sourceId,
+      stage,
+      comparison: compareNativeExplorerState(expected, observed),
+      observedFolders: observed.folders,
+    });
   }
 }
