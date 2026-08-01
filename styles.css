@@ -35,6 +35,26 @@
   opacity: 0.45;
 }
 
+.workspace-tab-header.file-explorer-split-move-popout {
+  opacity: 1;
+  position: relative;
+}
+
+.file-explorer-split-popout-preview {
+  background: var(--interactive-accent);
+  border-radius: var(--radius-s);
+  color: var(--text-on-accent);
+  font-size: var(--font-ui-smaller);
+  left: 50%;
+  padding: 3px 6px;
+  pointer-events: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  z-index: var(--layer-popover);
+}
+
 .workspace-tabs.file-explorer-split-move-target {
   position: relative;
 }

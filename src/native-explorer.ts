@@ -63,7 +63,7 @@ export function getLeftExplorerLeaves(app: App): WorkspaceLeaf[] {
 
 export function getExplorerView(leaf: WorkspaceLeaf): NativeExplorerView | null {
   const view = leaf.view as unknown as Partial<NativeExplorerView>;
-  return view.containerEl instanceof HTMLElement ? (view as NativeExplorerView) : null;
+  return isHtmlElement(view.containerEl) ? (view as NativeExplorerView) : null;
 }
 
 /** Captures the per-pane state that the core file explorer does not serialize. */
@@ -278,11 +278,12 @@ export class ExplorerCopyDragController {
   constructor(
     private readonly app: App,
     private readonly copyService: VaultCopyService,
+    private readonly getInteractiveLeaves: () => WorkspaceLeaf[] = () => getLeftExplorerLeaves(this.app),
   ) {}
 
   refresh(): void {
     const currentContainers = new Set<HTMLElement>();
-    for (const leaf of getLeftExplorerLeaves(this.app)) {
+    for (const leaf of this.getInteractiveLeaves()) {
       const view = getExplorerView(leaf);
       if (!view) {
         continue;
@@ -427,13 +428,13 @@ export class ExplorerCopyDragController {
       }
     }
 
-    const targetElement = target instanceof HTMLElement ? target : null;
+    const targetElement = asHtmlElement(target);
     const navigator = view.navFileContainerEl ?? view.containerEl;
     return targetElement && navigator.contains(targetElement) ? this.app.vault.getRoot() : null;
   }
 
   private findDropElement(target: EventTarget | null, view: NativeExplorerView): HTMLElement | null {
-    const element = target instanceof HTMLElement ? target : null;
+    const element = asHtmlElement(target);
     if (!element) {
       return null;
     }
@@ -468,4 +469,14 @@ export class ExplorerCopyDragController {
     this.pending = null;
     this.setHighlighted(null);
   }
+}
+
+function asHtmlElement(value: EventTarget | null | undefined): HTMLElement | null {
+  return value && typeof value === "object" && (value as Node).nodeType === 1
+    ? value as HTMLElement
+    : null;
+}
+
+function isHtmlElement(value: unknown): value is HTMLElement {
+  return value !== null && typeof value === "object" && (value as Node).nodeType === 1;
 }

@@ -1,18 +1,17 @@
 import { App, Notice, WorkspaceLeaf } from "obsidian";
 import type { DropPlacement } from "./layout-swap";
+import { isOutsideWindow, type PanelBounds, type ScreenPoint } from "./popout-utils";
 import { getLeftExplorerLeaves, isLeafInLeftSidebar, isNativeExplorer } from "./native-explorer";
 
-export type MoveHandler = (
-  source: WorkspaceLeaf,
-  target: WorkspaceLeaf,
-  placement: DropPlacement,
-) => Promise<boolean>;
+export type MoveHandler = (source: WorkspaceLeaf, target: WorkspaceLeaf, placement: DropPlacement) => Promise<boolean>;
+export type PopoutHandler = (source: WorkspaceLeaf, point: ScreenPoint, panel: PanelBounds) => Promise<boolean>;
 
 interface ExplorerHeaderEntry {
   leaf: WorkspaceLeaf;
   header: HTMLElement;
   tabsRoot: HTMLElement;
   headerContainer: HTMLElement;
+  inLeftSidebar: boolean;
 }
 
 interface ResolvedDrop {
@@ -25,40 +24,61 @@ interface WorkspaceTabsInternals {
   children?: WorkspaceLeaf[];
 }
 
-/** Private workspace-tab DOM adapter for moving native explorer leaves. */
+/** Cross-window DOM adapter for moving native explorer leaves. */
 export class ExplorerTabMoveController {
   private readonly cleanups = new Map<HTMLElement, () => void>();
-  private readonly entriesByTabsRoot = new Map<HTMLElement, ExplorerHeaderEntry[]>();
+  private readonly leftEntriesByTabsRoot = new Map<HTMLElement, ExplorerHeaderEntry[]>();
+  private readonly keyCleanups = new Map<Document, () => void>();
   private rootCleanup: (() => void) | null = null;
   private rootElement: HTMLElement | null = null;
   private source: ExplorerHeaderEntry | null = null;
   private target: ResolvedDrop | null = null;
+  private lastScreenPoint: ScreenPoint | null = null;
+  private outsideMainWindow = false;
 
   constructor(
     private readonly app: App,
+    private readonly getInteractiveLeaves: () => WorkspaceLeaf[],
+    private readonly isManagedPopoutLeaf: (leaf: WorkspaceLeaf) => boolean,
     private readonly onMove: MoveHandler,
+    private readonly onPopout: PopoutHandler,
   ) {}
 
   refresh(): void {
-    this.entriesByTabsRoot.clear();
+    this.leftEntriesByTabsRoot.clear();
     const currentHeaders = new Set<HTMLElement>();
-    for (const leaf of getLeftExplorerLeaves(this.app)) {
-      const entry = this.getHeaderEntry(leaf);
+    const documents = new Set<Document>();
+    const leaves = new Map<string, WorkspaceLeaf>();
+    for (const leaf of this.getInteractiveLeaves()) {
+      const id = getLeafId(leaf);
+      if (id) {
+        leaves.set(id, leaf);
+      }
+    }
+
+    for (const leaf of leaves.values()) {
+      const inLeftSidebar = isLeafInLeftSidebar(this.app, leaf);
+      if (!inLeftSidebar && !this.isManagedPopoutLeaf(leaf)) {
+        continue;
+      }
+      const entry = this.getHeaderEntry(leaf, inLeftSidebar);
       if (!entry) {
         continue;
       }
       currentHeaders.add(entry.header);
-      const groupEntries = this.entriesByTabsRoot.get(entry.tabsRoot) ?? [];
-      groupEntries.push(entry);
-      this.entriesByTabsRoot.set(entry.tabsRoot, groupEntries);
-
+      documents.add(entry.header.ownerDocument);
+      if (inLeftSidebar) {
+        const group = this.leftEntriesByTabsRoot.get(entry.tabsRoot) ?? [];
+        group.push(entry);
+        this.leftEntriesByTabsRoot.set(entry.tabsRoot, group);
+      }
       const icon = this.getHandle(entry.header);
       if (!icon) {
         continue;
       }
       icon.setAttribute("draggable", "true");
-      icon.setAttribute("aria-label", "拖动到文件列表的右侧、下方或标签栏以移动");
-      icon.setAttribute("title", "拖动到文件列表的右侧、下方或标签栏以移动");
+      icon.setAttribute("aria-label", "拖动到文件列表的右侧、下方、标签栏或窗口外");
+      icon.setAttribute("title", "拖动到文件列表的右侧、下方、标签栏或窗口外");
       icon.addClass("file-explorer-split-move-handle");
       if (!this.cleanups.has(entry.header)) {
         this.attachHandle(entry, icon);
@@ -71,7 +91,16 @@ export class ExplorerTabMoveController {
         this.cleanups.delete(header);
       }
     }
-    this.attachRootEvents();
+    for (const document of documents) {
+      this.attachKeyListener(document);
+    }
+    for (const [document, cleanup] of this.keyCleanups) {
+      if (!documents.has(document)) {
+        cleanup();
+        this.keyCleanups.delete(document);
+      }
+    }
+    this.attachLeftSidebarEvents();
   }
 
   unload(): void {
@@ -79,20 +108,27 @@ export class ExplorerTabMoveController {
       cleanup();
     }
     this.cleanups.clear();
+    for (const cleanup of this.keyCleanups.values()) {
+      cleanup();
+    }
+    this.keyCleanups.clear();
     this.rootCleanup?.();
     this.rootCleanup = null;
     this.rootElement = null;
     this.clearVisualState();
-    this.entriesByTabsRoot.clear();
+    this.leftEntriesByTabsRoot.clear();
   }
 
   private attachHandle(entry: ExplorerHeaderEntry, icon: HTMLElement): void {
     const onDragStart = (event: DragEvent) => this.startDrag(entry, event);
-    const onDragEnd = () => this.clearVisualState();
+    const onDrag = (event: DragEvent) => this.trackDrag(event);
+    const onDragEnd = (event: DragEvent) => this.finishDrag(event);
     icon.addEventListener("dragstart", onDragStart);
+    icon.addEventListener("drag", onDrag);
     icon.addEventListener("dragend", onDragEnd);
     this.cleanups.set(entry.header, () => {
       icon.removeEventListener("dragstart", onDragStart);
+      icon.removeEventListener("drag", onDrag);
       icon.removeEventListener("dragend", onDragEnd);
       icon.removeClass("file-explorer-split-move-handle");
       icon.removeAttribute("draggable");
@@ -101,7 +137,20 @@ export class ExplorerTabMoveController {
     });
   }
 
-  private attachRootEvents(): void {
+  private attachKeyListener(document: Document): void {
+    if (this.keyCleanups.has(document)) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        this.clearVisualState();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    this.keyCleanups.set(document, () => document.removeEventListener("keydown", onKeyDown, true));
+  }
+
+  private attachLeftSidebarEvents(): void {
     const root = this.getLeftSidebarElement();
     if (!root) {
       return;
@@ -121,20 +170,13 @@ export class ExplorerTabMoveController {
         this.setTarget(null);
       }
     };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        this.clearVisualState();
-      }
-    };
     root.addEventListener("dragover", onDragOver, true);
     root.addEventListener("drop", onDrop, true);
     root.addEventListener("dragleave", onDragLeave, true);
-    document.addEventListener("keydown", onKeyDown, true);
     this.rootCleanup = () => {
       root.removeEventListener("dragover", onDragOver, true);
       root.removeEventListener("drop", onDrop, true);
       root.removeEventListener("dragleave", onDragLeave, true);
-      document.removeEventListener("keydown", onKeyDown, true);
     };
   }
 
@@ -145,10 +187,37 @@ export class ExplorerTabMoveController {
     event.stopImmediatePropagation();
     this.clearVisualState();
     this.source = entry;
+    this.lastScreenPoint = this.pointFromEvent(event);
     entry.header.addClass("file-explorer-split-move-source");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-file-explorer-split-leaf", getLeafId(entry.leaf));
     event.dataTransfer.setData("text/plain", getLeafId(entry.leaf));
+  }
+
+  private trackDrag(event: DragEvent): void {
+    if (!this.source) {
+      return;
+    }
+    const point = this.pointFromEvent(event);
+    if (point) {
+      this.lastScreenPoint = point;
+    }
+    this.updateExternalPreview();
+  }
+
+  private finishDrag(event: DragEvent): void {
+    const source = this.source;
+    const point = this.pointFromEvent(event) ?? this.lastScreenPoint;
+    const shouldPopout = Boolean(source?.inLeftSidebar && this.outsideMainWindow && point);
+    const panel = source?.tabsRoot.getBoundingClientRect();
+    this.clearVisualState();
+    if (!source || !point || !panel || !shouldPopout) {
+      return;
+    }
+    void this.onPopout(source.leaf, point, { width: panel.width, height: panel.height }).catch((error: unknown) => {
+      console.error("[File Explorer Split] Popout failed", error);
+      new Notice(`打开独立窗口失败：${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   private dragOver(event: DragEvent): void {
@@ -162,6 +231,8 @@ export class ExplorerTabMoveController {
     if (event.dataTransfer) {
       event.dataTransfer.dropEffect = "move";
     }
+    this.outsideMainWindow = false;
+    this.removeExternalPreview();
     this.setTarget(target);
   }
 
@@ -182,7 +253,7 @@ export class ExplorerTabMoveController {
   }
 
   private resolveDrop(event: DragEvent): ResolvedDrop | null {
-    const element = event.target instanceof HTMLElement ? event.target : null;
+    const element = asHtmlElement(event.target);
     if (!element) {
       return null;
     }
@@ -190,7 +261,7 @@ export class ExplorerTabMoveController {
     if (!tabsRoot) {
       return null;
     }
-    const entry = this.getActiveExplorerEntry(tabsRoot);
+    const entry = this.getActiveLeftExplorerEntry(tabsRoot);
     if (!entry) {
       return null;
     }
@@ -205,20 +276,18 @@ export class ExplorerTabMoveController {
     if (rect.width <= 0 || rect.height <= 0) {
       return null;
     }
-    const isRight = event.clientX >= rect.right - rect.width * 0.3;
-    const isBottom = event.clientY >= rect.bottom - rect.height * 0.3;
-    if (isRight) {
+    if (event.clientX >= rect.right - rect.width * 0.3) {
       return { entry, placement: "right" };
     }
-    return isBottom ? { entry, placement: "bottom" } : null;
+    return event.clientY >= rect.bottom - rect.height * 0.3 ? { entry, placement: "bottom" } : null;
   }
 
-  private getActiveExplorerEntry(tabsRoot: HTMLElement): ExplorerHeaderEntry | null {
-    const entries = this.entriesByTabsRoot.get(tabsRoot) ?? [];
+  private getActiveLeftExplorerEntry(tabsRoot: HTMLElement): ExplorerHeaderEntry | null {
+    const entries = this.leftEntriesByTabsRoot.get(tabsRoot) ?? [];
     return entries.find((entry) => entry.header.hasClass("is-active")) ?? null;
   }
 
-  private getHeaderEntry(leaf: WorkspaceLeaf): ExplorerHeaderEntry | null {
+  private getHeaderEntry(leaf: WorkspaceLeaf, inLeftSidebar: boolean): ExplorerHeaderEntry | null {
     const parent = leaf.parent as unknown as WorkspaceTabsInternals;
     const tabsRoot = parent.containerEl;
     const index = (parent.children ?? []).indexOf(leaf);
@@ -230,11 +299,31 @@ export class ExplorerTabMoveController {
       ":scope > .workspace-tab-header-container .workspace-tab-header",
     ));
     const header = headers[index];
-    return header && headerContainer ? { leaf, header, tabsRoot, headerContainer } : null;
+    return header && headerContainer ? { leaf, header, tabsRoot, headerContainer, inLeftSidebar } : null;
   }
 
   private getHandle(header: HTMLElement): HTMLElement | null {
     return header.querySelector<HTMLElement>(".workspace-tab-header-inner-icon");
+  }
+
+  private updateExternalPreview(): void {
+    const source = this.source;
+    if (!source || !source.inLeftSidebar || !this.lastScreenPoint) {
+      return;
+    }
+    const bounds = this.getMainWindowBounds();
+    this.outsideMainWindow = Boolean(bounds && isOutsideWindow(this.lastScreenPoint, bounds));
+    if (this.outsideMainWindow) {
+      source.header.addClass("file-explorer-split-move-popout");
+      if (!source.header.querySelector(".file-explorer-split-popout-preview")) {
+        const preview = source.header.ownerDocument.createElement("span");
+        preview.className = "file-explorer-split-popout-preview";
+        preview.setText("松开以移至独立窗口");
+        source.header.appendChild(preview);
+      }
+    } else {
+      this.removeExternalPreview();
+    }
   }
 
   private setTarget(target: ResolvedDrop | null): void {
@@ -250,7 +339,7 @@ export class ExplorerTabMoveController {
     }
     target.entry.tabsRoot.addClass("file-explorer-split-move-target");
     target.entry.tabsRoot.addClass(`file-explorer-split-move-${target.placement}`);
-    const preview = document.createElement("span");
+    const preview = target.entry.tabsRoot.ownerDocument.createElement("span");
     preview.className = "file-explorer-split-move-preview";
     preview.setText(target.placement === "tab" ? "合并为标签组" : target.placement === "right" ? "移到右侧" : "移到下方");
     (target.placement === "tab" ? target.entry.headerContainer : target.entry.tabsRoot).appendChild(preview);
@@ -258,13 +347,33 @@ export class ExplorerTabMoveController {
 
   private clearVisualState(): void {
     this.source?.header.removeClass("file-explorer-split-move-source");
+    this.removeExternalPreview();
     this.source = null;
+    this.lastScreenPoint = null;
+    this.outsideMainWindow = false;
     this.setTarget(null);
+  }
+
+  private removeExternalPreview(): void {
+    this.source?.header.removeClass("file-explorer-split-move-popout");
+    this.source?.header.querySelector(".file-explorer-split-popout-preview")?.remove();
+  }
+
+  private pointFromEvent(event: DragEvent): ScreenPoint | null {
+    return event.screenX === 0 && event.screenY === 0 ? null : { x: event.screenX, y: event.screenY };
+  }
+
+  private getMainWindowBounds(): { x: number; y: number; width: number; height: number } | null {
+    const win = this.getLeftSidebarElement()?.ownerDocument.defaultView;
+    if (!win) {
+      return null;
+    }
+    return { x: win.screenX, y: win.screenY, width: win.outerWidth, height: win.outerHeight };
   }
 
   private getLeftSidebarElement(): HTMLElement | null {
     const split = this.app.workspace.leftSplit as unknown as { containerEl?: HTMLElement };
-    return split.containerEl instanceof HTMLElement ? split.containerEl : null;
+    return split.containerEl && isHtmlElement(split.containerEl) ? split.containerEl : null;
   }
 }
 
@@ -275,4 +384,14 @@ export function isValidLeftExplorer(app: App, leaf: WorkspaceLeaf): boolean {
 export function getLeafId(leaf: WorkspaceLeaf): string {
   const id = (leaf as unknown as { id?: unknown }).id;
   return typeof id === "string" ? id : "";
+}
+
+function asHtmlElement(value: EventTarget | null | undefined): HTMLElement | null {
+  return value && typeof value === "object" && (value as Node).nodeType === 1
+    ? value as HTMLElement
+    : null;
+}
+
+function isHtmlElement(value: unknown): value is HTMLElement {
+  return value !== null && typeof value === "object" && (value as Node).nodeType === 1;
 }

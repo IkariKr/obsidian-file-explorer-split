@@ -19,6 +19,8 @@ import {
   isNativeExplorer,
   restoreNativeExplorerState,
 } from "./native-explorer";
+import { PopoutExplorerRegistry } from "./popout-explorer-registry";
+import { createPopoutWindowData, type PanelBounds, type ScreenPoint } from "./popout-utils";
 import {
   DEFAULT_SETTINGS,
   FileExplorerSplitSettingTab,
@@ -35,6 +37,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private copyDragController: ExplorerCopyDragController | null = null;
   private moveController: ExplorerTabMoveController | null = null;
   private closeGuard: LastExplorerCloseGuard | null = null;
+  private popoutRegistry: PopoutExplorerRegistry | null = null;
   private diagnostics: MoveDiagnostics | null = null;
   private refreshTimer: number | null = null;
   private minimumExplorerTimer: number | null = null;
@@ -62,10 +65,20 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.headerControl = new ExplorerHeaderControl(this.app, this, () => {
       void this.splitCurrentFileExplorer();
     });
-    this.copyDragController = new ExplorerCopyDragController(this.app, new VaultCopyService(this.app));
     this.closeGuard = new LastExplorerCloseGuard(this.app);
-    this.moveController = new ExplorerTabMoveController(this.app, (source, target, placement) =>
-      this.moveExplorerLeaf(source, target, placement),
+    this.popoutRegistry = new PopoutExplorerRegistry(this.app);
+    this.popoutRegistry.rebuild();
+    this.copyDragController = new ExplorerCopyDragController(
+      this.app,
+      new VaultCopyService(this.app),
+      () => this.getInteractiveExplorerLeaves(),
+    );
+    this.moveController = new ExplorerTabMoveController(
+      this.app,
+      () => this.getInteractiveExplorerLeaves(),
+      (leaf) => this.popoutRegistry?.has(leaf) ?? false,
+      (source, target, placement) => this.moveExplorerLeaf(source, target, placement),
+      (source, point, panel) => this.moveExplorerToPopout(source, point, panel),
     );
 
     this.app.workspace.onLayoutReady(() => {
@@ -75,6 +88,15 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => {
       this.queueRefresh();
       this.queueMinimumExplorerCheck();
+    }));
+    this.registerEvent(this.app.workspace.on("window-open", () => {
+      this.diagnostics?.log("popout.window-open");
+      this.queueRefresh();
+    }));
+    this.registerEvent(this.app.workspace.on("window-close", () => {
+      this.popoutRegistry?.prune();
+      this.diagnostics?.log("popout.window-close");
+      this.queueRefresh();
     }));
   }
 
@@ -193,8 +215,13 @@ export default class FileExplorerSplitPlugin extends Plugin {
     target: WorkspaceLeaf,
     placement: DropPlacement,
   ): Promise<boolean> {
-    if (source === target || !isValidLeftExplorer(this.app, source) || !isValidLeftExplorer(this.app, target)) {
+    if (source === target || !isValidLeftExplorer(this.app, target)) {
       return false;
+    }
+    if (!isValidLeftExplorer(this.app, source)) {
+      return this.popoutRegistry?.has(source)
+        ? this.returnPopoutExplorer(source, target, placement)
+        : false;
     }
 
     const sourceId = getLeafId(source);
@@ -248,15 +275,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
       const movedLeaf = this.app.workspace.getLeafById(sourceId);
       await this.restoreExplorerStates(explorerStates, sourceId, targetId);
       await this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "immediate");
-      window.setTimeout(() => {
-        void this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "after-300ms");
-      }, 300);
-      window.setTimeout(() => {
-        void this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "after-1000ms");
-      }, 1000);
-      window.setTimeout(() => {
-        void this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "after-1800ms");
-      }, 1800);
+      this.scheduleExplorerVerification(explorerStates, sourceId, targetId);
       if (movedLeaf) {
         await this.app.workspace.revealLeaf(movedLeaf);
         this.app.workspace.setActiveLeaf(movedLeaf, { focus: true });
@@ -277,6 +296,101 @@ export default class FileExplorerSplitPlugin extends Plugin {
       viewState: leaf.getViewState(),
       ephemeralState: leaf.getEphemeralState(),
     }));
+  }
+
+  private getInteractiveExplorerLeaves(): WorkspaceLeaf[] {
+    const leaves = new Map<string, WorkspaceLeaf>();
+    for (const leaf of [...getLeftExplorerLeaves(this.app), ...(this.popoutRegistry?.getLeaves() ?? [])]) {
+      const leafId = getLeafId(leaf);
+      if (leafId) {
+        leaves.set(leafId, leaf);
+      }
+    }
+    return [...leaves.values()];
+  }
+
+  private async moveExplorerToPopout(
+    source: WorkspaceLeaf,
+    point: ScreenPoint,
+    panel: PanelBounds,
+  ): Promise<boolean> {
+    if (!isValidLeftExplorer(this.app, source)) {
+      return false;
+    }
+    const sourceId = getLeafId(source);
+    const snapshot = captureNativeExplorerState(source);
+    const data = createPopoutWindowData(point, panel);
+    const duplicate = getLeftExplorerLeaves(this.app).length <= 1;
+    this.diagnostics?.log("popout.request", { sourceId, duplicate, point, panel });
+    try {
+      if (duplicate) {
+        const newLeaf = this.app.workspace.openPopoutLeaf(data);
+        await newLeaf.setViewState(snapshot.viewState);
+        newLeaf.setEphemeralState(snapshot.ephemeralState);
+        this.popoutRegistry?.add(newLeaf);
+        const report = await restoreNativeExplorerState(newLeaf, snapshot);
+        this.diagnostics?.log("popout.created-copy", { sourceId, popoutLeafId: getLeafId(newLeaf), report });
+        new Notice("已在独立窗口创建文件列表副本，左侧最后一个文件列表保持不变。");
+      } else {
+        await this.withExplorerCloseAllowed(() => this.app.workspace.moveLeafToPopout(source, data));
+        this.popoutRegistry?.add(source);
+        const report = await restoreNativeExplorerState(source, snapshot);
+        this.diagnostics?.log("popout.moved", { sourceId, report });
+      }
+      this.queueRefresh();
+      return true;
+    } catch (error) {
+      this.diagnostics?.error("popout.failed", error, { sourceId, duplicate });
+      throw error;
+    }
+  }
+
+  private async returnPopoutExplorer(
+    source: WorkspaceLeaf,
+    target: WorkspaceLeaf,
+    placement: DropPlacement,
+  ): Promise<boolean> {
+    if (getLeftExplorerLeaves(this.app).length >= MAX_LEFT_EXPLORERS) {
+      new Notice(`左侧边栏最多同时显示 ${MAX_LEFT_EXPLORERS} 个文件列表，无法拖回。`);
+      this.diagnostics?.log("popout.return-rejected-max", { sourceId: getLeafId(source), targetId: getLeafId(target) });
+      return false;
+    }
+    const sourceId = getLeafId(source);
+    const targetId = getLeafId(target);
+    if (!sourceId || !targetId) {
+      return false;
+    }
+    const snapshot = captureNativeExplorerState(source);
+    const preservedStates = this.captureLeftExplorerStates();
+    const temporaryLeaf = this.app.workspace.createLeafBySplit(target, "vertical");
+    const temporaryId = getLeafId(temporaryLeaf);
+    if (!temporaryId) {
+      temporaryLeaf.detach();
+      return false;
+    }
+    try {
+      await temporaryLeaf.setViewState(snapshot.viewState);
+      temporaryLeaf.setEphemeralState(snapshot.ephemeralState);
+      preservedStates.set(temporaryId, snapshot);
+      const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
+      if (!moveLeftSidebarLeaf(layout, temporaryId, targetId, placement)) {
+        temporaryLeaf.detach();
+        this.diagnostics?.log("popout.return-layout-transform-failed", { sourceId, targetId, placement });
+        return false;
+      }
+      await this.changeLeftSidebarLayout(layout);
+      await this.restoreExplorerStates(preservedStates, temporaryId, targetId);
+      await this.verifyAndRepairExplorerStates(preservedStates, temporaryId, targetId, "immediate");
+      this.scheduleExplorerVerification(preservedStates, temporaryId, targetId);
+      source.detach();
+      this.popoutRegistry?.remove(source);
+      this.diagnostics?.log("popout.returned", { sourceId, returnedLeafId: temporaryId, targetId, placement });
+      this.queueRefresh();
+      return true;
+    } catch (error) {
+      this.diagnostics?.error("popout.return-failed", error, { sourceId, targetId, placement });
+      throw error;
+    }
   }
 
   private captureLeftExplorerStates(): Map<string, ReturnType<typeof captureNativeExplorerState>> {
@@ -356,11 +470,30 @@ export default class FileExplorerSplitPlugin extends Plugin {
       || Math.abs(comparison.scrollTopDelta) > 2;
   }
 
+  private scheduleExplorerVerification(
+    states: Map<string, ReturnType<typeof captureNativeExplorerState>>,
+    sourceId: string,
+    targetId: string,
+  ): void {
+    window.setTimeout(() => {
+      void this.verifyAndRepairExplorerStates(states, sourceId, targetId, "after-300ms");
+    }, 300);
+    window.setTimeout(() => {
+      void this.verifyAndRepairExplorerStates(states, sourceId, targetId, "after-1000ms");
+    }, 1000);
+    window.setTimeout(() => {
+      void this.verifyAndRepairExplorerStates(states, sourceId, targetId, "after-1800ms");
+    }, 1800);
+  }
+
   private async changeLeftSidebarLayout(layout: WorkspaceLayout): Promise<void> {
+    await this.withExplorerCloseAllowed(() => this.app.workspace.changeLayout(layout));
+  }
+
+  private async withExplorerCloseAllowed<T>(action: () => Promise<T> | T): Promise<T> {
     if (this.closeGuard) {
-      await this.closeGuard.withCloseAllowed(() => this.app.workspace.changeLayout(layout));
-      return;
+      return this.closeGuard.withCloseAllowed(action);
     }
-    await this.app.workspace.changeLayout(layout);
+    return action();
   }
 }
