@@ -233,13 +233,24 @@ export default class FileExplorerSplitPlugin extends Plugin {
       explorersBefore: this.describeExplorerLeaves(),
     });
     try {
-      const sourceState = captureNativeExplorerState(source);
+      const explorerStates = this.captureLeftExplorerStates();
+      const sourceState = explorerStates.get(sourceId) ?? captureNativeExplorerState(source);
       this.diagnostics?.log("move.snapshot", {
         sourceId,
         folders: sourceState.folders,
         folderCount: sourceState.folders.length,
         scrollTop: sourceState.scrollTop,
         ephemeralState: sourceState.ephemeralState,
+      });
+      this.diagnostics?.log("move.all-explorer-snapshots", {
+        sourceId,
+        explorers: [...explorerStates.entries()].map(([leafId, state]) => ({
+          leafId,
+          isSource: leafId === sourceId,
+          isTarget: leafId === targetId,
+          folders: state.folders,
+          scrollTop: state.scrollTop,
+        })),
       });
       const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
       if (!moveLeftSidebarLeaf(layout, sourceId, targetId, placement)) {
@@ -255,20 +266,18 @@ export default class FileExplorerSplitPlugin extends Plugin {
         explorersAfterLayout: this.describeExplorerLeaves(),
       });
       const movedLeaf = this.app.workspace.getLeafById(sourceId);
+      await this.restoreExplorerStates(explorerStates, sourceId, targetId);
+      await this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "immediate");
+      window.setTimeout(() => {
+        void this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "after-300ms");
+      }, 300);
+      window.setTimeout(() => {
+        void this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "after-1000ms");
+      }, 1000);
+      window.setTimeout(() => {
+        void this.verifyAndRepairExplorerStates(explorerStates, sourceId, targetId, "after-1800ms");
+      }, 1800);
       if (movedLeaf) {
-        const report = await restoreNativeExplorerState(movedLeaf, sourceState);
-        this.diagnostics?.log("move.restore-complete", {
-          sourceId,
-          report,
-          restoredViewState: movedLeaf.getViewState(),
-        });
-        this.logRestoredExplorerState(sourceId, sourceState, movedLeaf, "immediate");
-        window.setTimeout(() => {
-          this.logRestoredExplorerState(sourceId, sourceState, movedLeaf, "after-300ms");
-        }, 300);
-        window.setTimeout(() => {
-          this.logRestoredExplorerState(sourceId, sourceState, movedLeaf, "after-1000ms");
-        }, 1000);
         await this.app.workspace.revealLeaf(movedLeaf);
         this.app.workspace.setActiveLeaf(movedLeaf, { focus: true });
       } else {
@@ -290,18 +299,80 @@ export default class FileExplorerSplitPlugin extends Plugin {
     }));
   }
 
-  private logRestoredExplorerState(
+  private captureLeftExplorerStates(): Map<string, ReturnType<typeof captureNativeExplorerState>> {
+    const states = new Map<string, ReturnType<typeof captureNativeExplorerState>>();
+    for (const leaf of getLeftExplorerLeaves(this.app)) {
+      const leafId = getLeafId(leaf);
+      if (leafId) {
+        states.set(leafId, captureNativeExplorerState(leaf));
+      }
+    }
+    return states;
+  }
+
+  private async restoreExplorerStates(
+    states: Map<string, ReturnType<typeof captureNativeExplorerState>>,
     sourceId: string,
-    expected: ReturnType<typeof captureNativeExplorerState>,
-    leaf: WorkspaceLeaf,
-    stage: "immediate" | "after-300ms" | "after-1000ms",
-  ): void {
-    const observed = captureNativeExplorerState(leaf);
-    this.diagnostics?.log("move.restore-verification", {
-      sourceId,
-      stage,
-      comparison: compareNativeExplorerState(expected, observed),
-      observedFolders: observed.folders,
-    });
+    targetId: string,
+  ): Promise<void> {
+    for (const [leafId, state] of states) {
+      const leaf = this.app.workspace.getLeafById(leafId);
+      if (!leaf || !isNativeExplorer(leaf) || !isLeafInLeftSidebar(this.app, leaf)) {
+        this.diagnostics?.log("move.restore-leaf-missing", { leafId, sourceId, targetId });
+        continue;
+      }
+      try {
+        const report = await restoreNativeExplorerState(leaf, state);
+        this.diagnostics?.log("move.restore-complete", {
+          leafId,
+          isSource: leafId === sourceId,
+          isTarget: leafId === targetId,
+          report,
+          restoredViewState: leaf.getViewState(),
+        });
+      } catch (error) {
+        this.diagnostics?.error("move.restore-failed", error, { leafId, sourceId, targetId });
+      }
+    }
+  }
+
+  private async verifyAndRepairExplorerStates(
+    states: Map<string, ReturnType<typeof captureNativeExplorerState>>,
+    sourceId: string,
+    targetId: string,
+    stage: "immediate" | "after-300ms" | "after-1000ms" | "after-1800ms",
+  ): Promise<void> {
+    for (const [leafId, expected] of states) {
+      const leaf = this.app.workspace.getLeafById(leafId);
+      if (!leaf || !isNativeExplorer(leaf) || !isLeafInLeftSidebar(this.app, leaf)) {
+        this.diagnostics?.log("move.restore-verification-leaf-missing", { leafId, sourceId, targetId, stage });
+        continue;
+      }
+      const observed = captureNativeExplorerState(leaf);
+      const comparison = compareNativeExplorerState(expected, observed);
+      this.diagnostics?.log("move.restore-verification", {
+        leafId,
+        isSource: leafId === sourceId,
+        isTarget: leafId === targetId,
+        stage,
+        comparison,
+        observedFolders: observed.folders,
+      });
+      if (!this.hasRestoreMismatch(comparison)) {
+        continue;
+      }
+      try {
+        const report = await restoreNativeExplorerState(leaf, expected);
+        this.diagnostics?.log("move.restore-retry", { leafId, sourceId, targetId, stage, comparison, report });
+      } catch (error) {
+        this.diagnostics?.error("move.restore-retry-failed", error, { leafId, sourceId, targetId, stage, comparison });
+      }
+    }
+  }
+
+  private hasRestoreMismatch(comparison: ReturnType<typeof compareNativeExplorerState>): boolean {
+    return comparison.collapsedMismatches.length > 0
+      || comparison.missingVisibleFolders.length > 0
+      || Math.abs(comparison.scrollTopDelta) > 2;
   }
 }
