@@ -20,6 +20,13 @@ export interface NativeExplorerStateSnapshot {
   scrollTop: number;
 }
 
+export interface NativeExplorerRestoreReport {
+  navigatorFound: boolean;
+  expandedFoldersRestored: number;
+  collapsedFoldersRestored: number;
+  scrollTop: number;
+}
+
 export function isNativeExplorer(leaf: WorkspaceLeaf): boolean {
   return leaf.getViewState().type === FILE_EXPLORER_VIEW_TYPE;
 }
@@ -70,7 +77,7 @@ export function captureNativeExplorerState(leaf: WorkspaceLeaf): NativeExplorerS
 export async function restoreNativeExplorerState(
   leaf: WorkspaceLeaf,
   snapshot: NativeExplorerStateSnapshot,
-): Promise<void> {
+): Promise<NativeExplorerRestoreReport> {
   if (leaf.isDeferred) {
     await leaf.loadIfDeferred();
   }
@@ -82,10 +89,17 @@ export async function restoreNativeExplorerState(
   const view = getExplorerView(leaf);
   const navigator = view?.navFileContainerEl ?? view?.containerEl;
   if (!navigator) {
-    return;
+    return {
+      navigatorFound: false,
+      expandedFoldersRestored: 0,
+      collapsedFoldersRestored: 0,
+      scrollTop: 0,
+    };
   }
   const states = new Map(snapshot.folders.map((folder) => [folder.path, folder]));
   const orderedPaths = [...states.keys()].sort((a, b) => a.split("/").length - b.split("/").length);
+  let expandedFoldersRestored = 0;
+  let collapsedFoldersRestored = 0;
 
   // Expand required ancestors first so their descendants are available in the DOM.
   for (const path of orderedPaths) {
@@ -93,6 +107,7 @@ export async function restoreNativeExplorerState(
     const folder = findFolderByPath(navigator, path);
     if (desired && folder?.classList.contains("is-collapsed") && !desired.collapsed) {
       getFolderTitle(folder)?.click();
+      expandedFoldersRestored += 1;
     }
   }
   // Collapse from deep to shallow so the visible tree matches the source pane.
@@ -101,9 +116,16 @@ export async function restoreNativeExplorerState(
     const folder = findFolderByPath(navigator, path);
     if (desired && folder && !folder.classList.contains("is-collapsed") && desired.collapsed) {
       getFolderTitle(folder)?.click();
+      collapsedFoldersRestored += 1;
     }
   }
   navigator.scrollTop = snapshot.scrollTop;
+  return {
+    navigatorFound: true,
+    expandedFoldersRestored,
+    collapsedFoldersRestored,
+    scrollTop: snapshot.scrollTop,
+  };
 }
 
 function getFolderTitle(folder: HTMLElement): HTMLElement | null {

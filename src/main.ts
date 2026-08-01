@@ -1,5 +1,6 @@
 import { Notice, Plugin, WorkspaceLeaf, WorkspaceSplit } from "obsidian";
 import { VaultCopyService } from "./copy-service";
+import { MoveDiagnostics } from "./diagnostics";
 import { ExplorerTabMoveController, getLeafId, isValidLeftExplorer } from "./explorer-reorder";
 import { moveLeftSidebarLeaf, type DropPlacement, type WorkspaceLayout } from "./layout-swap";
 import {
@@ -26,17 +27,29 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private headerControl: ExplorerHeaderControl | null = null;
   private copyDragController: ExplorerCopyDragController | null = null;
   private moveController: ExplorerTabMoveController | null = null;
+  private diagnostics: MoveDiagnostics | null = null;
   private refreshTimer: number | null = null;
   private minimumExplorerTimer: number | null = null;
   private isRestoringMinimumExplorer = false;
 
   async onload(): Promise<void> {
+    this.diagnostics = new MoveDiagnostics(this.app, this.manifest.id);
+    try {
+      await this.diagnostics.start();
+    } catch (error) {
+      console.error("[File Explorer Split] Failed to start diagnostics", error);
+    }
     await this.loadSettings();
     this.addSettingTab(new FileExplorerSplitSettingTab(this.app, this));
     this.addCommand({
       id: "split-current-file-explorer",
       name: "Split current file explorer",
       callback: () => void this.splitCurrentFileExplorer(),
+    });
+    this.addCommand({
+      id: "show-diagnostic-log-location",
+      name: "Show diagnostic log location",
+      callback: () => new Notice(`诊断日志：${this.diagnostics?.path ?? "不可用"}`),
     });
     this.headerControl = new ExplorerHeaderControl(this.app, this, () => {
       void this.splitCurrentFileExplorer();
@@ -57,6 +70,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.diagnostics?.log("session.unloading");
     if (this.refreshTimer !== null) {
       window.clearTimeout(this.refreshTimer);
     }
@@ -182,21 +196,62 @@ export default class FileExplorerSplitPlugin extends Plugin {
       return false;
     }
 
-    const sourceState = captureNativeExplorerState(source);
-    const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
-    if (!moveLeftSidebarLeaf(layout, sourceId, targetId, placement)) {
-      new Notice("未能在左侧布局中完成文件列表移动。");
-      return false;
-    }
+    this.diagnostics?.log("move.request", {
+      sourceId,
+      targetId,
+      placement,
+      sourceViewState: source.getViewState(),
+      targetViewState: target.getViewState(),
+      explorersBefore: this.describeExplorerLeaves(),
+    });
+    try {
+      const sourceState = captureNativeExplorerState(source);
+      this.diagnostics?.log("move.snapshot", {
+        sourceId,
+        folders: sourceState.folders,
+        folderCount: sourceState.folders.length,
+        scrollTop: sourceState.scrollTop,
+        ephemeralState: sourceState.ephemeralState,
+      });
+      const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
+      if (!moveLeftSidebarLeaf(layout, sourceId, targetId, placement)) {
+        this.diagnostics?.log("move.layout-transform-failed", { sourceId, targetId, placement });
+        new Notice("未能在左侧布局中完成文件列表移动。");
+        return false;
+      }
 
-    await this.app.workspace.changeLayout(layout);
-    const movedLeaf = this.app.workspace.getLeafById(sourceId);
-    if (movedLeaf) {
-      await restoreNativeExplorerState(movedLeaf, sourceState);
-      await this.app.workspace.revealLeaf(movedLeaf);
-      this.app.workspace.setActiveLeaf(movedLeaf, { focus: true });
+      await this.app.workspace.changeLayout(layout);
+      this.diagnostics?.log("move.layout-applied", {
+        sourceId,
+        targetId,
+        explorersAfterLayout: this.describeExplorerLeaves(),
+      });
+      const movedLeaf = this.app.workspace.getLeafById(sourceId);
+      if (movedLeaf) {
+        const report = await restoreNativeExplorerState(movedLeaf, sourceState);
+        this.diagnostics?.log("move.restore-complete", {
+          sourceId,
+          report,
+          restoredViewState: movedLeaf.getViewState(),
+        });
+        await this.app.workspace.revealLeaf(movedLeaf);
+        this.app.workspace.setActiveLeaf(movedLeaf, { focus: true });
+      } else {
+        this.diagnostics?.log("move.source-leaf-missing-after-layout", { sourceId, targetId });
+      }
+      this.queueRefresh();
+      return true;
+    } catch (error) {
+      this.diagnostics?.error("move.failed", error, { sourceId, targetId, placement });
+      throw error;
     }
-    this.queueRefresh();
-    return true;
+  }
+
+  private describeExplorerLeaves(): Array<Record<string, unknown>> {
+    return getLeftExplorerLeaves(this.app).map((leaf) => ({
+      id: getLeafId(leaf),
+      viewState: leaf.getViewState(),
+      ephemeralState: leaf.getEphemeralState(),
+    }));
   }
 }

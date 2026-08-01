@@ -18,6 +18,7 @@ test("source contains native explorer split, Ctrl-copy, and drag-move adapters",
   const main = await readFile(new URL("src/main.ts", root), "utf8");
   const adapter = await readFile(new URL("src/native-explorer.ts", root), "utf8");
   const moveAdapter = await readFile(new URL("src/explorer-reorder.ts", root), "utf8");
+  const diagnostics = await readFile(new URL("src/diagnostics.ts", root), "utf8");
 
   assert.match(main, /createLeafBySplit/);
   assert.match(main, /createLeafInParent/);
@@ -32,5 +33,8 @@ test("source contains native explorer split, Ctrl-copy, and drag-move adapters",
   assert.match(moveAdapter, /"bottom"/);
   assert.match(moveAdapter, /"right"/);
   assert.match(moveAdapter, /"tab"/);
+  assert.match(main, /move\.snapshot/);
+  assert.match(main, /move\.restore-complete/);
+  assert.match(diagnostics, /debug\.log/);
   assert.ok(fileURLToPath(root).endsWith("obsidian-file-explorer-split\\") || fileURLToPath(root).endsWith("obsidian-file-explorer-split/"));
 });

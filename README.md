@@ -14,3 +14,7 @@
 最多同时显示 4 个左侧原生文件列表。插件使用目录链接装入 Life-OS，修改代码后执行 `npm run build`，再在 Obsidian 中执行“重新加载应用（不保存）”或重启即可加载新版本。
 
 左侧边栏至少会保留一个原生文件列表；关闭最后一个时，插件会立即恢复一个新的文件列表。
+
+## 诊断日志
+
+当文件列表移动出现状态异常时，可在命令面板运行 `File Explorer Split: Show diagnostic log location`。日志位于 `.obsidian/plugins/file-explorer-split/debug.log`，记录最近一次应用启动后的拖放移动、源视图快照和状态恢复结果。
