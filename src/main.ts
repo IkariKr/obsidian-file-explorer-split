@@ -5,9 +5,11 @@ import { moveLeftSidebarLeaf, type DropPlacement, type WorkspaceLayout } from ".
 import {
   ExplorerCopyDragController,
   ExplorerHeaderControl,
+  captureNativeExplorerState,
   getLeftExplorerLeaves,
   isLeafInLeftSidebar,
   isNativeExplorer,
+  restoreNativeExplorerState,
 } from "./native-explorer";
 import {
   DEFAULT_SETTINGS,
@@ -137,6 +139,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
       return false;
     }
 
+    const sourceState = captureNativeExplorerState(source);
     const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
     if (!moveLeftSidebarLeaf(layout, sourceId, targetId, placement)) {
       new Notice("未能在左侧布局中完成文件列表移动。");
@@ -146,6 +149,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     await this.app.workspace.changeLayout(layout);
     const movedLeaf = this.app.workspace.getLeafById(sourceId);
     if (movedLeaf) {
+      await restoreNativeExplorerState(movedLeaf, sourceState);
       await this.app.workspace.revealLeaf(movedLeaf);
       this.app.workspace.setActiveLeaf(movedLeaf, { focus: true });
     }

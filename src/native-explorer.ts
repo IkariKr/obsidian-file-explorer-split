@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, setIcon } from "obsidian";
+import { App, Notice, Plugin, TAbstractFile, TFile, TFolder, ViewState, WorkspaceLeaf, setIcon } from "obsidian";
 import { VaultCopyService } from "./copy-service";
 import { FILE_EXPLORER_VIEW_TYPE, type DragSelection, type NativeExplorerView } from "./types";
 
@@ -6,6 +6,18 @@ type SplitHandler = () => void;
 
 interface PendingCopyDrag extends DragSelection {
   startedAt: number;
+}
+
+interface FolderDomState {
+  path: string;
+  collapsed: boolean;
+}
+
+export interface NativeExplorerStateSnapshot {
+  viewState: ViewState;
+  ephemeralState: unknown;
+  folders: FolderDomState[];
+  scrollTop: number;
 }
 
 export function isNativeExplorer(leaf: WorkspaceLeaf): boolean {
@@ -32,6 +44,91 @@ export function getLeftExplorerLeaves(app: App): WorkspaceLeaf[] {
 export function getExplorerView(leaf: WorkspaceLeaf): NativeExplorerView | null {
   const view = leaf.view as unknown as Partial<NativeExplorerView>;
   return view.containerEl instanceof HTMLElement ? (view as NativeExplorerView) : null;
+}
+
+/** Captures the per-pane state that the core file explorer does not serialize. */
+export function captureNativeExplorerState(leaf: WorkspaceLeaf): NativeExplorerStateSnapshot {
+  const view = getExplorerView(leaf);
+  const navigator = view?.navFileContainerEl ?? view?.containerEl;
+  const folders: FolderDomState[] = [];
+  for (const folder of Array.from(navigator?.querySelectorAll<HTMLElement>(".nav-folder") ?? [])) {
+    const title = getFolderTitle(folder);
+    const path = title?.dataset.path;
+    if (path) {
+      folders.push({ path, collapsed: folder.classList.contains("is-collapsed") });
+    }
+  }
+  return {
+    viewState: cloneState(leaf.getViewState()),
+    ephemeralState: cloneState(leaf.getEphemeralState()),
+    folders,
+    scrollTop: navigator?.scrollTop ?? 0,
+  };
+}
+
+/** Restores the source explorer after changeLayout recreates its runtime tree. */
+export async function restoreNativeExplorerState(
+  leaf: WorkspaceLeaf,
+  snapshot: NativeExplorerStateSnapshot,
+): Promise<void> {
+  if (leaf.isDeferred) {
+    await leaf.loadIfDeferred();
+  }
+  await leaf.setViewState(cloneState(snapshot.viewState));
+  leaf.setEphemeralState(cloneState(snapshot.ephemeralState));
+  await nextFrame();
+  await nextFrame();
+
+  const view = getExplorerView(leaf);
+  const navigator = view?.navFileContainerEl ?? view?.containerEl;
+  if (!navigator) {
+    return;
+  }
+  const states = new Map(snapshot.folders.map((folder) => [folder.path, folder]));
+  const orderedPaths = [...states.keys()].sort((a, b) => a.split("/").length - b.split("/").length);
+
+  // Expand required ancestors first so their descendants are available in the DOM.
+  for (const path of orderedPaths) {
+    const desired = states.get(path);
+    const folder = findFolderByPath(navigator, path);
+    if (desired && folder?.classList.contains("is-collapsed") && !desired.collapsed) {
+      getFolderTitle(folder)?.click();
+    }
+  }
+  // Collapse from deep to shallow so the visible tree matches the source pane.
+  for (const path of orderedPaths.reverse()) {
+    const desired = states.get(path);
+    const folder = findFolderByPath(navigator, path);
+    if (desired && folder && !folder.classList.contains("is-collapsed") && desired.collapsed) {
+      getFolderTitle(folder)?.click();
+    }
+  }
+  navigator.scrollTop = snapshot.scrollTop;
+}
+
+function getFolderTitle(folder: HTMLElement): HTMLElement | null {
+  return folder.querySelector<HTMLElement>(":scope > .nav-folder-title[data-path]")
+    ?? folder.querySelector<HTMLElement>(":scope > [data-path]");
+}
+
+function findFolderByPath(container: HTMLElement, path: string): HTMLElement | null {
+  return Array.from(container.querySelectorAll<HTMLElement>(".nav-folder"))
+    .find((folder) => getFolderTitle(folder)?.dataset.path === path) ?? null;
+}
+
+function cloneState<T>(value: T): T {
+  if (value === undefined) {
+    return value;
+  }
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
 export class ExplorerHeaderControl {

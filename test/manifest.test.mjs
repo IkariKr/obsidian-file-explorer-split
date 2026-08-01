@@ -23,6 +23,8 @@ test("source contains native explorer split, Ctrl-copy, and drag-move adapters",
   assert.match(main, /file-explorer/);
   assert.match(adapter, /event\.ctrlKey/);
   assert.match(adapter, /CopyDragController/);
+  assert.match(adapter, /captureNativeExplorerState/);
+  assert.match(adapter, /restoreNativeExplorerState/);
   assert.match(moveAdapter, /ExplorerTabMoveController/);
   assert.match(moveAdapter, /"bottom"/);
   assert.match(moveAdapter, /"right"/);
