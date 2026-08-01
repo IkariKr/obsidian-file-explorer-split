@@ -23,25 +23,52 @@
   width: var(--icon-size);
 }
 
-.file-explorer-split-reorder-handle {
+.file-explorer-split-move-handle {
   cursor: grab;
 }
 
-.file-explorer-split-reorder-handle:active {
+.file-explorer-split-move-handle:active {
   cursor: grabbing;
 }
 
-.workspace-tab-header.file-explorer-split-swap-source {
+.workspace-tab-header.file-explorer-split-move-source {
   opacity: 0.45;
 }
 
-.workspace-tab-header.file-explorer-split-swap-target {
-  outline: 2px solid var(--interactive-accent);
-  outline-offset: -2px;
+.workspace-tabs.file-explorer-split-move-target {
   position: relative;
 }
 
-.file-explorer-split-swap-preview {
+.workspace-tabs.file-explorer-split-move-right::after,
+.workspace-tabs.file-explorer-split-move-bottom::after,
+.workspace-tabs.file-explorer-split-move-tab .workspace-tab-header-container::after {
+  background: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+  border: 2px solid var(--interactive-accent);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.workspace-tabs.file-explorer-split-move-tab .workspace-tab-header-container {
+  position: relative;
+}
+
+.workspace-tabs.file-explorer-split-move-right::after {
+  border-radius: var(--radius-m) 0 0 var(--radius-m);
+  left: 70%;
+}
+
+.workspace-tabs.file-explorer-split-move-bottom::after {
+  border-radius: var(--radius-m) var(--radius-m) 0 0;
+  top: 70%;
+}
+
+.workspace-tabs.file-explorer-split-move-tab .workspace-tab-header-container::after {
+  border-radius: var(--radius-m);
+}
+
+.file-explorer-split-move-preview {
   align-items: center;
   background: var(--interactive-accent);
   border-radius: var(--radius-s);
@@ -54,10 +81,22 @@
   padding: 3px 6px;
   pointer-events: none;
   position: absolute;
-  top: calc(100% + 4px);
+  top: 50%;
   transform: translateX(-50%);
   white-space: nowrap;
   z-index: var(--layer-popover);
+}
+
+.workspace-tabs.file-explorer-split-move-right .file-explorer-split-move-preview {
+  left: 85%;
+}
+
+.workspace-tabs.file-explorer-split-move-bottom .file-explorer-split-move-preview {
+  top: 85%;
+}
+
+.workspace-tabs.file-explorer-split-move-tab .file-explorer-split-move-preview {
+  top: 50%;
 }
 
 .file-explorer-split-copy-target {
