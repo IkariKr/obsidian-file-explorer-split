@@ -1,7 +1,8 @@
-import { Notice, Plugin, WorkspaceLeaf, WorkspaceSplit } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { VaultCopyService } from "./copy-service";
 import { MoveDiagnostics } from "./diagnostics";
 import { ExplorerTabMoveController, getLeafId, isValidLeftExplorer } from "./explorer-reorder";
+import { LastExplorerCloseGuard } from "./last-explorer-close-guard";
 import {
   ensureLeftExplorersUseTabs,
   moveLeftSidebarLeaf,
@@ -33,10 +34,10 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private headerControl: ExplorerHeaderControl | null = null;
   private copyDragController: ExplorerCopyDragController | null = null;
   private moveController: ExplorerTabMoveController | null = null;
+  private closeGuard: LastExplorerCloseGuard | null = null;
   private diagnostics: MoveDiagnostics | null = null;
   private refreshTimer: number | null = null;
   private minimumExplorerTimer: number | null = null;
-  private isRestoringMinimumExplorer = false;
   private isNormalizingExplorerTabs = false;
 
   async onload(): Promise<void> {
@@ -62,13 +63,14 @@ export default class FileExplorerSplitPlugin extends Plugin {
       void this.splitCurrentFileExplorer();
     });
     this.copyDragController = new ExplorerCopyDragController(this.app, new VaultCopyService(this.app));
+    this.closeGuard = new LastExplorerCloseGuard(this.app);
     this.moveController = new ExplorerTabMoveController(this.app, (source, target, placement) =>
       this.moveExplorerLeaf(source, target, placement),
     );
 
     this.app.workspace.onLayoutReady(() => {
       this.refreshAdapters();
-      void this.ensureMinimumExplorer();
+      void this.ensureExplorerTabContainers();
     });
     this.registerEvent(this.app.workspace.on("layout-change", () => {
       this.queueRefresh();
@@ -87,6 +89,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.headerControl?.unload();
     this.copyDragController?.unload();
     this.moveController?.unload();
+    this.closeGuard?.unload();
   }
 
   async updateSettings(settings: FileExplorerSplitSettings): Promise<void> {
@@ -108,6 +111,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.headerControl?.refresh();
     this.copyDragController?.refresh();
     this.moveController?.refresh();
+    this.closeGuard?.refresh();
   }
 
   private queueRefresh(): void {
@@ -119,42 +123,18 @@ export default class FileExplorerSplitPlugin extends Plugin {
       this.headerControl?.refresh();
       this.copyDragController?.refresh();
       this.moveController?.refresh();
+      this.closeGuard?.refresh();
     }, 50);
   }
 
   private queueMinimumExplorerCheck(): void {
-    if (this.minimumExplorerTimer !== null || this.isRestoringMinimumExplorer) {
+    if (this.minimumExplorerTimer !== null) {
       return;
     }
     this.minimumExplorerTimer = window.setTimeout(() => {
       this.minimumExplorerTimer = null;
-      void this.ensureMinimumExplorer();
+      void this.ensureExplorerTabContainers();
     }, 0);
-  }
-
-  private async ensureMinimumExplorer(): Promise<void> {
-    if (this.isRestoringMinimumExplorer) {
-      return;
-    }
-    if (getLeftExplorerLeaves(this.app).length === 0) {
-      this.isRestoringMinimumExplorer = true;
-      try {
-        const leaf = this.app.workspace.createLeafInParent(this.app.workspace.leftSplit as WorkspaceSplit, 0);
-        await leaf.setViewState({
-          type: FILE_EXPLORER_VIEW_TYPE,
-          state: {},
-          active: false,
-        });
-        new Notice("已保留一个左侧文件列表，不能全部关闭。");
-      } catch (error) {
-        console.error("[File Explorer Split] Failed to restore the last explorer", error);
-        new Notice("无法恢复最后一个文件列表。请重新打开文件列表视图。");
-      } finally {
-        this.isRestoringMinimumExplorer = false;
-      }
-    }
-    await this.ensureExplorerTabContainers();
-    this.queueRefresh();
   }
 
   private async ensureExplorerTabContainers(): Promise<void> {
@@ -167,7 +147,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     }
     this.isNormalizingExplorerTabs = true;
     try {
-      await this.app.workspace.changeLayout(layout);
+      await this.changeLeftSidebarLayout(layout);
     } catch (error) {
       console.error("[File Explorer Split] Failed to normalize file explorer tab containers", error);
     } finally {
@@ -259,7 +239,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
         return false;
       }
 
-      await this.app.workspace.changeLayout(layout);
+      await this.changeLeftSidebarLayout(layout);
       this.diagnostics?.log("move.layout-applied", {
         sourceId,
         targetId,
@@ -374,5 +354,13 @@ export default class FileExplorerSplitPlugin extends Plugin {
     return comparison.collapsedMismatches.length > 0
       || comparison.missingVisibleFolders.length > 0
       || Math.abs(comparison.scrollTopDelta) > 2;
+  }
+
+  private async changeLeftSidebarLayout(layout: WorkspaceLayout): Promise<void> {
+    if (this.closeGuard) {
+      await this.closeGuard.withCloseAllowed(() => this.app.workspace.changeLayout(layout));
+      return;
+    }
+    await this.app.workspace.changeLayout(layout);
   }
 }
