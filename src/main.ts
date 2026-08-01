@@ -79,6 +79,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
       (leaf) => this.popoutRegistry?.has(leaf) ?? false,
       (source, target, placement) => this.moveExplorerLeaf(source, target, placement),
       (source, point, panel) => this.moveExplorerToPopout(source, point, panel),
+      (event, details) => this.diagnostics?.log(event, details),
     );
 
     this.app.workspace.onLayoutReady(() => {

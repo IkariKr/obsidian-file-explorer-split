@@ -17,11 +17,20 @@ export interface PanelBounds {
   height: number;
 }
 
+export interface ClientPoint {
+  x: number;
+  y: number;
+}
+
 export function isOutsideWindow(point: ScreenPoint, bounds: ScreenBounds): boolean {
   return point.x < bounds.x
     || point.x > bounds.x + bounds.width
     || point.y < bounds.y
     || point.y > bounds.y + bounds.height;
+}
+
+export function isNearWindowEdge(point: ClientPoint, width: number, height: number, edge = 32): boolean {
+  return point.x <= edge || point.x >= width - edge || point.y <= edge || point.y >= height - edge;
 }
 
 export function createPopoutWindowData(

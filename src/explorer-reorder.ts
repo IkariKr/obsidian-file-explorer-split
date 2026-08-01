@@ -1,10 +1,11 @@
 import { App, Notice, WorkspaceLeaf } from "obsidian";
 import type { DropPlacement } from "./layout-swap";
-import { isOutsideWindow, type PanelBounds, type ScreenPoint } from "./popout-utils";
+import { isNearWindowEdge, isOutsideWindow, type ClientPoint, type PanelBounds, type ScreenPoint } from "./popout-utils";
 import { getLeftExplorerLeaves, isLeafInLeftSidebar, isNativeExplorer } from "./native-explorer";
 
 export type MoveHandler = (source: WorkspaceLeaf, target: WorkspaceLeaf, placement: DropPlacement) => Promise<boolean>;
 export type PopoutHandler = (source: WorkspaceLeaf, point: ScreenPoint, panel: PanelBounds) => Promise<boolean>;
+export type DragDiagnosticHandler = (event: string, details: Record<string, unknown>) => void;
 
 interface ExplorerHeaderEntry {
   leaf: WorkspaceLeaf;
@@ -34,6 +35,7 @@ export class ExplorerTabMoveController {
   private source: ExplorerHeaderEntry | null = null;
   private target: ResolvedDrop | null = null;
   private lastScreenPoint: ScreenPoint | null = null;
+  private lastClientPoint: ClientPoint | null = null;
   private outsideMainWindow = false;
 
   constructor(
@@ -42,6 +44,7 @@ export class ExplorerTabMoveController {
     private readonly isManagedPopoutLeaf: (leaf: WorkspaceLeaf) => boolean,
     private readonly onMove: MoveHandler,
     private readonly onPopout: PopoutHandler,
+    private readonly onDiagnostic?: DragDiagnosticHandler,
   ) {}
 
   refresh(): void {
@@ -188,6 +191,12 @@ export class ExplorerTabMoveController {
     this.clearVisualState();
     this.source = entry;
     this.lastScreenPoint = this.pointFromEvent(event);
+    this.lastClientPoint = { x: event.clientX, y: event.clientY };
+    this.onDiagnostic?.("popout.drag-start", {
+      sourceId: getLeafId(entry.leaf),
+      screenPoint: this.lastScreenPoint,
+      clientPoint: this.lastClientPoint,
+    });
     entry.header.addClass("file-explorer-split-move-source");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("application/x-file-explorer-split-leaf", getLeafId(entry.leaf));
@@ -202,6 +211,7 @@ export class ExplorerTabMoveController {
     if (point) {
       this.lastScreenPoint = point;
     }
+    this.lastClientPoint = { x: event.clientX, y: event.clientY };
     this.updateExternalPreview();
   }
 
@@ -210,6 +220,12 @@ export class ExplorerTabMoveController {
     const point = this.pointFromEvent(event) ?? this.lastScreenPoint;
     const shouldPopout = Boolean(source?.inLeftSidebar && this.outsideMainWindow && point);
     const panel = source?.tabsRoot.getBoundingClientRect();
+    this.onDiagnostic?.("popout.drag-end", {
+      sourceId: source ? getLeafId(source.leaf) : "",
+      point,
+      outsideMainWindow: this.outsideMainWindow,
+      shouldPopout,
+    });
     this.clearVisualState();
     if (!source || !point || !panel || !shouldPopout) {
       return;
@@ -312,7 +328,20 @@ export class ExplorerTabMoveController {
       return;
     }
     const bounds = this.getMainWindowBounds();
-    this.outsideMainWindow = Boolean(bounds && isOutsideWindow(this.lastScreenPoint, bounds));
+    const mainWindow = this.getLeftSidebarElement()?.ownerDocument.defaultView;
+    const wasOutside = this.outsideMainWindow;
+    this.outsideMainWindow = Boolean(
+      bounds
+      && (isOutsideWindow(this.lastScreenPoint, bounds)
+        || (mainWindow && this.lastClientPoint && isNearWindowEdge(this.lastClientPoint, mainWindow.innerWidth, mainWindow.innerHeight))),
+    );
+    if (this.outsideMainWindow && !wasOutside) {
+      this.onDiagnostic?.("popout.edge-armed", {
+        sourceId: getLeafId(source.leaf),
+        screenPoint: this.lastScreenPoint,
+        clientPoint: this.lastClientPoint,
+      });
+    }
     if (this.outsideMainWindow) {
       source.header.addClass("file-explorer-split-move-popout");
       if (!source.header.querySelector(".file-explorer-split-popout-preview")) {
@@ -350,6 +379,7 @@ export class ExplorerTabMoveController {
     this.removeExternalPreview();
     this.source = null;
     this.lastScreenPoint = null;
+    this.lastClientPoint = null;
     this.outsideMainWindow = false;
     this.setTarget(null);
   }

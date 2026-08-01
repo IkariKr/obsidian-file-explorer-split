@@ -11,7 +11,7 @@ const result = await esbuild.build({
 });
 const module = { exports: {} };
 new Function("module", "exports", result.outputFiles[0].text)(module, module.exports);
-const { createPopoutWindowData, isOutsideWindow } = module.exports;
+const { createPopoutWindowData, isNearWindowEdge, isOutsideWindow } = module.exports;
 
 test("recognizes a drop outside any edge of the main window", () => {
   const bounds = { x: 100, y: 200, width: 800, height: 600 };
@@ -21,6 +21,12 @@ test("recognizes a drop outside any edge of the main window", () => {
   assert.equal(isOutsideWindow({ x: 901, y: 400 }, bounds), true);
   assert.equal(isOutsideWindow({ x: 400, y: 199 }, bounds), true);
   assert.equal(isOutsideWindow({ x: 400, y: 801 }, bounds), true);
+});
+
+test("recognizes the in-window edge activation zone used when Electron drops outside drag coordinates", () => {
+  assert.equal(isNearWindowEdge({ x: 31, y: 400 }, 1200, 800), true);
+  assert.equal(isNearWindowEdge({ x: 600, y: 769 }, 1200, 800), true);
+  assert.equal(isNearWindowEdge({ x: 600, y: 400 }, 1200, 800), false);
 });
 
 test("creates a visible, bounded popout window near the release point", () => {
