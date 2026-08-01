@@ -333,10 +333,16 @@ export default class FileExplorerSplitPlugin extends Plugin {
         this.diagnostics?.log("popout.created-copy", { sourceId, popoutLeafId: getLeafId(newLeaf), report });
         new Notice("已在独立窗口创建文件列表副本，左侧最后一个文件列表保持不变。");
       } else {
-        await this.withExplorerCloseAllowed(() => this.app.workspace.moveLeafToPopout(source, data));
-        this.popoutRegistry?.add(source);
-        const report = await restoreNativeExplorerState(source, snapshot);
-        this.diagnostics?.log("popout.moved", { sourceId, report });
+        // moveLeafToPopout() can be a no-op for core file-explorer leaves in
+        // some desktop builds. Create the popout first, then remove the source
+        // only after its native state is fully restored.
+        const newLeaf = this.app.workspace.openPopoutLeaf(data);
+        await newLeaf.setViewState(snapshot.viewState);
+        newLeaf.setEphemeralState(snapshot.ephemeralState);
+        this.popoutRegistry?.add(newLeaf);
+        const report = await restoreNativeExplorerState(newLeaf, snapshot);
+        await this.withExplorerCloseAllowed(() => source.detach());
+        this.diagnostics?.log("popout.moved", { sourceId, popoutLeafId: getLeafId(newLeaf), report });
       }
       this.queueRefresh();
       return true;

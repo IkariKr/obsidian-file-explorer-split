@@ -29,13 +29,13 @@ test("recognizes the in-window edge activation zone used when Electron drops out
   assert.equal(isNearWindowEdge({ x: 600, y: 400 }, 1200, 800), false);
 });
 
-test("creates a visible, bounded popout window near the release point", () => {
+test("creates a visible, bounded popout window and lets Obsidian choose its display position", () => {
   assert.deepEqual(
     createPopoutWindowData({ x: 1200, y: 700 }, { width: 240, height: 1200 }),
-    { x: 1020, y: 668, size: { width: 360, height: 900 } },
+    { size: { width: 360, height: 900 } },
   );
   assert.deepEqual(
     createPopoutWindowData({ x: 1200, y: 700 }, { width: 2000, height: 200 }),
-    { x: 880, y: 668, size: { width: 640, height: 520 } },
+    { size: { width: 640, height: 520 } },
   );
 });

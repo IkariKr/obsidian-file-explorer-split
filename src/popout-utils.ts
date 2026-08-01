@@ -34,14 +34,12 @@ export function isNearWindowEdge(point: ClientPoint, width: number, height: numb
 }
 
 export function createPopoutWindowData(
-  point: ScreenPoint,
+  _point: ScreenPoint,
   panel: PanelBounds,
 ): WorkspaceWindowInitData {
   const width = Math.max(360, Math.min(640, Math.round(panel.width || 480)));
   const height = Math.max(520, Math.min(900, Math.round(panel.height || 720)));
-  return {
-    x: Math.round(point.x - width / 2),
-    y: Math.round(point.y - 32),
-    size: { width, height },
-  };
+  // Let Obsidian choose a visible display and position. Passing raw drag
+  // coordinates can place a popout above or beyond a multi-monitor work area.
+  return { size: { width, height } };
 }
