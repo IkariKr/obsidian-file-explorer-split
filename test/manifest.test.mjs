@@ -20,6 +20,9 @@ test("source contains native explorer split, Ctrl-copy, and drag-move adapters",
   const moveAdapter = await readFile(new URL("src/explorer-reorder.ts", root), "utf8");
 
   assert.match(main, /createLeafBySplit/);
+  assert.match(main, /createLeafInParent/);
+  assert.match(main, /ensureMinimumExplorer/);
+  assert.match(main, /不能全部关闭/);
   assert.match(main, /file-explorer/);
   assert.match(adapter, /event\.ctrlKey/);
   assert.match(adapter, /CopyDragController/);

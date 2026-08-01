@@ -1,4 +1,4 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf, WorkspaceSplit } from "obsidian";
 import { VaultCopyService } from "./copy-service";
 import { ExplorerTabMoveController, getLeafId, isValidLeftExplorer } from "./explorer-reorder";
 import { moveLeftSidebarLeaf, type DropPlacement, type WorkspaceLayout } from "./layout-swap";
@@ -27,6 +27,8 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private copyDragController: ExplorerCopyDragController | null = null;
   private moveController: ExplorerTabMoveController | null = null;
   private refreshTimer: number | null = null;
+  private minimumExplorerTimer: number | null = null;
+  private isRestoringMinimumExplorer = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -44,13 +46,22 @@ export default class FileExplorerSplitPlugin extends Plugin {
       this.moveExplorerLeaf(source, target, placement),
     );
 
-    this.app.workspace.onLayoutReady(() => this.refreshAdapters());
-    this.registerEvent(this.app.workspace.on("layout-change", () => this.queueRefresh()));
+    this.app.workspace.onLayoutReady(() => {
+      this.refreshAdapters();
+      void this.ensureMinimumExplorer();
+    });
+    this.registerEvent(this.app.workspace.on("layout-change", () => {
+      this.queueRefresh();
+      this.queueMinimumExplorerCheck();
+    }));
   }
 
   onunload(): void {
     if (this.refreshTimer !== null) {
       window.clearTimeout(this.refreshTimer);
+    }
+    if (this.minimumExplorerTimer !== null) {
+      window.clearTimeout(this.minimumExplorerTimer);
     }
     this.headerControl?.unload();
     this.copyDragController?.unload();
@@ -88,6 +99,38 @@ export default class FileExplorerSplitPlugin extends Plugin {
       this.copyDragController?.refresh();
       this.moveController?.refresh();
     }, 50);
+  }
+
+  private queueMinimumExplorerCheck(): void {
+    if (this.minimumExplorerTimer !== null || this.isRestoringMinimumExplorer) {
+      return;
+    }
+    this.minimumExplorerTimer = window.setTimeout(() => {
+      this.minimumExplorerTimer = null;
+      void this.ensureMinimumExplorer();
+    }, 0);
+  }
+
+  private async ensureMinimumExplorer(): Promise<void> {
+    if (this.isRestoringMinimumExplorer || getLeftExplorerLeaves(this.app).length > 0) {
+      return;
+    }
+    this.isRestoringMinimumExplorer = true;
+    try {
+      const leaf = this.app.workspace.createLeafInParent(this.app.workspace.leftSplit as WorkspaceSplit, 0);
+      await leaf.setViewState({
+        type: FILE_EXPLORER_VIEW_TYPE,
+        state: {},
+        active: false,
+      });
+      new Notice("已保留一个左侧文件列表，不能全部关闭。");
+      this.queueRefresh();
+    } catch (error) {
+      console.error("[File Explorer Split] Failed to restore the last explorer", error);
+      new Notice("无法恢复最后一个文件列表。请重新打开文件列表视图。");
+    } finally {
+      this.isRestoringMinimumExplorer = false;
+    }
   }
 
   private async splitCurrentFileExplorer(): Promise<void> {
