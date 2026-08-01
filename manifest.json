@@ -1,0 +1,9 @@
+{
+  "id": "file-explorer-split",
+  "name": "File Explorer Split",
+  "version": "0.1.0",
+  "minAppVersion": "1.12.0",
+  "description": "Split the native file explorer into panes and copy files between them.",
+  "author": "IkariKr",
+  "isDesktopOnly": true
+}

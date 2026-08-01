@@ -1,0 +1,57 @@
+.file-explorer-split-tab-button {
+  align-items: center;
+  align-self: stretch;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--icon-color);
+  cursor: var(--cursor);
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  margin: 2px 3px;
+  padding: 0 7px;
+}
+
+.file-explorer-split-tab-button:hover {
+  background-color: var(--background-modifier-hover);
+  color: var(--icon-color-hover);
+}
+
+.file-explorer-split-tab-button svg {
+  height: var(--icon-size);
+  width: var(--icon-size);
+}
+
+.file-explorer-split-copy-target {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+.file-explorer-split-conflicts {
+  color: var(--text-muted);
+  margin: 0 0 1em;
+}
+
+.file-explorer-split-conflict-list {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  margin: 0 0 1em;
+  max-height: 240px;
+  overflow: auto;
+  padding: 0.5em 0.75em;
+}
+
+.file-explorer-split-conflict-list li {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  margin: 0.2em 0;
+  overflow-wrap: anywhere;
+}
+
+.file-explorer-split-modal-actions {
+  display: flex;
+  gap: 0.5em;
+  justify-content: flex-end;
+}

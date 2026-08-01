@@ -1,0 +1,17 @@
+{
+  "name": "obsidian-file-explorer-split",
+  "version": "0.1.0",
+  "description": "Split Obsidian's native file explorer and copy files between panes.",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "test": "node --test test/manifest.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.0",
+    "obsidian": "latest",
+    "typescript": "^5.7.2"
+  }
+}
