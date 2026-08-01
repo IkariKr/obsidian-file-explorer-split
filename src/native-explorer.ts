@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, setIcon } from "obsidian";
+import { App, Notice, Plugin, TAbstractFile, TFile, TFolder, ViewState, WorkspaceLeaf, setIcon } from "obsidian";
 import { VaultCopyService } from "./copy-service";
 import { FILE_EXPLORER_VIEW_TYPE, type DragSelection, type NativeExplorerView } from "./types";
 
@@ -6,6 +6,38 @@ type SplitHandler = () => void;
 
 interface PendingCopyDrag extends DragSelection {
   startedAt: number;
+}
+
+interface FolderDomState {
+  path: string;
+  collapsed: boolean;
+}
+
+export interface NativeExplorerStateSnapshot {
+  viewState: ViewState;
+  ephemeralState: unknown;
+  folders: FolderDomState[];
+  scrollTop: number;
+}
+
+export interface NativeExplorerRestoreReport {
+  navigatorFound: boolean;
+  expandedFoldersRestored: number;
+  collapsedFoldersRestored: number;
+  scrollTop: number;
+}
+
+export interface NativeExplorerStateComparison {
+  expectedFolderCount: number;
+  observedFolderCount: number;
+  matchedFolders: number;
+  collapsedMismatches: Array<{ path: string; expected: boolean; observed: boolean }>;
+  missingVisibleFolders: string[];
+  missingBecauseAncestorCollapsed: string[];
+  unexpectedVisibleFolders: string[];
+  expectedScrollTop: number;
+  observedScrollTop: number;
+  scrollTopDelta: number;
 }
 
 export function isNativeExplorer(leaf: WorkspaceLeaf): boolean {
@@ -31,7 +63,168 @@ export function getLeftExplorerLeaves(app: App): WorkspaceLeaf[] {
 
 export function getExplorerView(leaf: WorkspaceLeaf): NativeExplorerView | null {
   const view = leaf.view as unknown as Partial<NativeExplorerView>;
-  return view.containerEl instanceof HTMLElement ? (view as NativeExplorerView) : null;
+  return isHtmlElement(view.containerEl) ? (view as NativeExplorerView) : null;
+}
+
+/** Captures the per-pane state that the core file explorer does not serialize. */
+export function captureNativeExplorerState(leaf: WorkspaceLeaf): NativeExplorerStateSnapshot {
+  const view = getExplorerView(leaf);
+  const navigator = view?.navFileContainerEl ?? view?.containerEl;
+  const folders: FolderDomState[] = [];
+  for (const folder of Array.from(navigator?.querySelectorAll<HTMLElement>(".nav-folder") ?? [])) {
+    const title = getFolderTitle(folder);
+    const path = title?.dataset.path;
+    if (path) {
+      folders.push({ path, collapsed: folder.classList.contains("is-collapsed") });
+    }
+  }
+  return {
+    viewState: cloneState(leaf.getViewState()),
+    ephemeralState: cloneState(leaf.getEphemeralState()),
+    folders,
+    scrollTop: navigator?.scrollTop ?? 0,
+  };
+}
+
+/**
+ * Compares a captured explorer state with the DOM currently rendered by Obsidian.
+ * A descendant hidden under an expected collapsed ancestor is normal, so it is
+ * reported separately from a folder that should have been visible but is absent.
+ */
+export function compareNativeExplorerState(
+  expected: NativeExplorerStateSnapshot,
+  observed: NativeExplorerStateSnapshot,
+): NativeExplorerStateComparison {
+  const expectedByPath = new Map(expected.folders.map((folder) => [folder.path, folder]));
+  const observedByPath = new Map(observed.folders.map((folder) => [folder.path, folder]));
+  const collapsedMismatches: NativeExplorerStateComparison["collapsedMismatches"] = [];
+  const missingVisibleFolders: string[] = [];
+  const missingBecauseAncestorCollapsed: string[] = [];
+
+  for (const [path, expectedFolder] of expectedByPath) {
+    const observedFolder = observedByPath.get(path);
+    if (observedFolder) {
+      if (expectedFolder.collapsed !== observedFolder.collapsed) {
+        collapsedMismatches.push({
+          path,
+          expected: expectedFolder.collapsed,
+          observed: observedFolder.collapsed,
+        });
+      }
+      continue;
+    }
+    if (hasCollapsedAncestor(path, expectedByPath)) {
+      missingBecauseAncestorCollapsed.push(path);
+    } else {
+      missingVisibleFolders.push(path);
+    }
+  }
+
+  const unexpectedVisibleFolders = [...observedByPath.keys()]
+    .filter((path) => !expectedByPath.has(path));
+  return {
+    expectedFolderCount: expected.folders.length,
+    observedFolderCount: observed.folders.length,
+    matchedFolders: expected.folders.length - missingVisibleFolders.length - missingBecauseAncestorCollapsed.length,
+    collapsedMismatches,
+    missingVisibleFolders,
+    missingBecauseAncestorCollapsed,
+    unexpectedVisibleFolders,
+    expectedScrollTop: expected.scrollTop,
+    observedScrollTop: observed.scrollTop,
+    scrollTopDelta: observed.scrollTop - expected.scrollTop,
+  };
+}
+
+/** Restores the source explorer after changeLayout recreates its runtime tree. */
+export async function restoreNativeExplorerState(
+  leaf: WorkspaceLeaf,
+  snapshot: NativeExplorerStateSnapshot,
+): Promise<NativeExplorerRestoreReport> {
+  if (leaf.isDeferred) {
+    await leaf.loadIfDeferred();
+  }
+  await leaf.setViewState(cloneState(snapshot.viewState));
+  leaf.setEphemeralState(cloneState(snapshot.ephemeralState));
+  await nextFrame();
+  await nextFrame();
+
+  const view = getExplorerView(leaf);
+  const navigator = view?.navFileContainerEl ?? view?.containerEl;
+  if (!navigator) {
+    return {
+      navigatorFound: false,
+      expandedFoldersRestored: 0,
+      collapsedFoldersRestored: 0,
+      scrollTop: 0,
+    };
+  }
+  const states = new Map(snapshot.folders.map((folder) => [folder.path, folder]));
+  const orderedPaths = [...states.keys()].sort((a, b) => a.split("/").length - b.split("/").length);
+  let expandedFoldersRestored = 0;
+  let collapsedFoldersRestored = 0;
+
+  // Expand required ancestors first so their descendants are available in the DOM.
+  for (const path of orderedPaths) {
+    const desired = states.get(path);
+    const folder = findFolderByPath(navigator, path);
+    if (desired && folder?.classList.contains("is-collapsed") && !desired.collapsed) {
+      getFolderTitle(folder)?.click();
+      expandedFoldersRestored += 1;
+    }
+  }
+  // Collapse from deep to shallow so the visible tree matches the source pane.
+  for (const path of orderedPaths.reverse()) {
+    const desired = states.get(path);
+    const folder = findFolderByPath(navigator, path);
+    if (desired && folder && !folder.classList.contains("is-collapsed") && desired.collapsed) {
+      getFolderTitle(folder)?.click();
+      collapsedFoldersRestored += 1;
+    }
+  }
+  navigator.scrollTop = snapshot.scrollTop;
+  return {
+    navigatorFound: true,
+    expandedFoldersRestored,
+    collapsedFoldersRestored,
+    scrollTop: snapshot.scrollTop,
+  };
+}
+
+function getFolderTitle(folder: HTMLElement): HTMLElement | null {
+  return folder.querySelector<HTMLElement>(":scope > .nav-folder-title[data-path]")
+    ?? folder.querySelector<HTMLElement>(":scope > [data-path]");
+}
+
+function findFolderByPath(container: HTMLElement, path: string): HTMLElement | null {
+  return Array.from(container.querySelectorAll<HTMLElement>(".nav-folder"))
+    .find((folder) => getFolderTitle(folder)?.dataset.path === path) ?? null;
+}
+
+function hasCollapsedAncestor(path: string, folders: Map<string, FolderDomState>): boolean {
+  const segments = path.split("/");
+  for (let index = 1; index < segments.length; index += 1) {
+    const ancestor = folders.get(segments.slice(0, index).join("/"));
+    if (ancestor?.collapsed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cloneState<T>(value: T): T {
+  if (value === undefined) {
+    return value;
+  }
+  try {
+    return structuredClone(value);
+  } catch {
+    return JSON.parse(JSON.stringify(value)) as T;
+  }
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
 }
 
 export class ExplorerHeaderControl {
@@ -85,11 +278,12 @@ export class ExplorerCopyDragController {
   constructor(
     private readonly app: App,
     private readonly copyService: VaultCopyService,
+    private readonly getInteractiveLeaves: () => WorkspaceLeaf[] = () => getLeftExplorerLeaves(this.app),
   ) {}
 
   refresh(): void {
     const currentContainers = new Set<HTMLElement>();
-    for (const leaf of getLeftExplorerLeaves(this.app)) {
+    for (const leaf of this.getInteractiveLeaves()) {
       const view = getExplorerView(leaf);
       if (!view) {
         continue;
@@ -234,13 +428,13 @@ export class ExplorerCopyDragController {
       }
     }
 
-    const targetElement = target instanceof HTMLElement ? target : null;
+    const targetElement = asHtmlElement(target);
     const navigator = view.navFileContainerEl ?? view.containerEl;
     return targetElement && navigator.contains(targetElement) ? this.app.vault.getRoot() : null;
   }
 
   private findDropElement(target: EventTarget | null, view: NativeExplorerView): HTMLElement | null {
-    const element = target instanceof HTMLElement ? target : null;
+    const element = asHtmlElement(target);
     if (!element) {
       return null;
     }
@@ -275,4 +469,14 @@ export class ExplorerCopyDragController {
     this.pending = null;
     this.setHighlighted(null);
   }
+}
+
+function asHtmlElement(value: EventTarget | null | undefined): HTMLElement | null {
+  return value && typeof value === "object" && (value as Node).nodeType === 1
+    ? value as HTMLElement
+    : null;
+}
+
+function isHtmlElement(value: unknown): value is HTMLElement {
+  return value !== null && typeof value === "object" && (value as Node).nodeType === 1;
 }
