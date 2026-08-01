@@ -1,5 +1,7 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { App, FuzzySuggestModal, Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { VaultCopyService } from "./copy-service";
+import { ExplorerTabReorderController, getLeafId, isValidLeftExplorer } from "./explorer-reorder";
+import { swapLeftSidebarLeafNodes, type WorkspaceLayout } from "./layout-swap";
 import {
   ExplorerCopyDragController,
   ExplorerHeaderControl,
@@ -21,6 +23,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
 
   private headerControl: ExplorerHeaderControl | null = null;
   private copyDragController: ExplorerCopyDragController | null = null;
+  private reorderController: ExplorerTabReorderController | null = null;
   private refreshTimer: number | null = null;
 
   async onload(): Promise<void> {
@@ -31,11 +34,19 @@ export default class FileExplorerSplitPlugin extends Plugin {
       name: "Split current file explorer",
       callback: () => void this.splitCurrentFileExplorer(),
     });
+    this.addCommand({
+      id: "swap-file-explorer-positions",
+      name: "Swap file explorer positions",
+      callback: () => this.openSwapPicker(),
+    });
 
     this.headerControl = new ExplorerHeaderControl(this.app, this, () => {
       void this.splitCurrentFileExplorer();
     });
     this.copyDragController = new ExplorerCopyDragController(this.app, new VaultCopyService(this.app));
+    this.reorderController = new ExplorerTabReorderController(this.app, (source, target) =>
+      this.swapExplorerLeaves(source, target),
+    );
 
     this.app.workspace.onLayoutReady(() => this.refreshAdapters());
     this.registerEvent(this.app.workspace.on("layout-change", () => this.queueRefresh()));
@@ -47,6 +58,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     }
     this.headerControl?.unload();
     this.copyDragController?.unload();
+    this.reorderController?.unload();
   }
 
   async updateSettings(settings: FileExplorerSplitSettings): Promise<void> {
@@ -67,6 +79,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.headerControl?.start();
     this.headerControl?.refresh();
     this.copyDragController?.refresh();
+    this.reorderController?.refresh();
   }
 
   private queueRefresh(): void {
@@ -77,6 +90,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
       this.refreshTimer = null;
       this.headerControl?.refresh();
       this.copyDragController?.refresh();
+      this.reorderController?.refresh();
     }, 50);
   }
 
@@ -111,5 +125,80 @@ export default class FileExplorerSplitPlugin extends Plugin {
       return active;
     }
     return getLeftExplorerLeaves(this.app)[0] ?? null;
+  }
+
+  private openSwapPicker(): void {
+    const leaves = getLeftExplorerLeaves(this.app);
+    if (leaves.length < 2) {
+      new Notice("至少需要两个左侧文件列表才能交换位置。");
+      return;
+    }
+    new ExplorerLeafPickerModal(
+      this.app,
+      leaves,
+      "选择要交换的文件列表",
+      (source) => {
+        new ExplorerLeafPickerModal(
+          this.app,
+          leaves.filter((leaf) => leaf !== source),
+          "选择目标文件列表",
+          (target) => void this.swapExplorerLeaves(source, target),
+        ).open();
+      },
+    ).open();
+  }
+
+  private async swapExplorerLeaves(source: WorkspaceLeaf, target: WorkspaceLeaf): Promise<boolean> {
+    if (source === target || !isValidLeftExplorer(this.app, source) || !isValidLeftExplorer(this.app, target)) {
+      return false;
+    }
+
+    const sourceId = getLeafId(source);
+    const targetId = getLeafId(target);
+    if (!sourceId || !targetId) {
+      new Notice("无法识别要交换的文件列表。");
+      return false;
+    }
+
+    const layout = JSON.parse(JSON.stringify(this.app.workspace.getLayout())) as WorkspaceLayout;
+    if (!swapLeftSidebarLeafNodes(layout, sourceId, targetId)) {
+      new Notice("未能在左侧布局中找到要交换的文件列表。");
+      return false;
+    }
+
+    const activeId = this.app.workspace.activeLeaf ? getLeafId(this.app.workspace.activeLeaf) : "";
+    await this.app.workspace.changeLayout(layout);
+    const activeLeaf = activeId ? this.app.workspace.getLeafById(activeId) : null;
+    if (activeLeaf) {
+      await this.app.workspace.revealLeaf(activeLeaf);
+      this.app.workspace.setActiveLeaf(activeLeaf, { focus: true });
+    }
+    this.queueRefresh();
+    return true;
+  }
+}
+
+class ExplorerLeafPickerModal extends FuzzySuggestModal<WorkspaceLeaf> {
+  constructor(
+    app: App,
+    private readonly leaves: WorkspaceLeaf[],
+    placeholder: string,
+    private readonly onChoose: (leaf: WorkspaceLeaf) => void,
+  ) {
+    super(app);
+    this.setPlaceholder(placeholder);
+  }
+
+  getItems(): WorkspaceLeaf[] {
+    return this.leaves;
+  }
+
+  getItemText(leaf: WorkspaceLeaf): string {
+    const index = this.leaves.indexOf(leaf) + 1;
+    return `文件列表 ${index} · ${getLeafId(leaf).slice(-4) || "未知"}`;
+  }
+
+  onChooseItem(leaf: WorkspaceLeaf): void {
+    this.onChoose(leaf);
   }
 }

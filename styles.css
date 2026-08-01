@@ -23,6 +23,43 @@
   width: var(--icon-size);
 }
 
+.file-explorer-split-reorder-handle {
+  cursor: grab;
+}
+
+.file-explorer-split-reorder-handle:active {
+  cursor: grabbing;
+}
+
+.workspace-tab-header.file-explorer-split-swap-source {
+  opacity: 0.45;
+}
+
+.workspace-tab-header.file-explorer-split-swap-target {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+  position: relative;
+}
+
+.file-explorer-split-swap-preview {
+  align-items: center;
+  background: var(--interactive-accent);
+  border-radius: var(--radius-s);
+  color: var(--text-on-accent);
+  display: inline-flex;
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold);
+  left: 50%;
+  line-height: 1;
+  padding: 3px 6px;
+  pointer-events: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  z-index: var(--layer-popover);
+}
+
 .file-explorer-split-copy-target {
   outline: 2px solid var(--interactive-accent);
   outline-offset: -2px;

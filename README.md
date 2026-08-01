@@ -7,6 +7,8 @@
 - 左侧栏顶部、文件列表/书签/搜索标签右侧的面板图标：按默认方向分栏。
 - 设置 → **File Explorer Split**：选择默认的左右或上下分栏。
 - 命令面板：`File Explorer Split: Split current file explorer`。
+- 拖动任一原生文件列表顶部的文件夹图标到另一个文件夹图标：交换两个文件列表的位置。
+- 命令面板：`File Explorer Split: Swap file explorer positions`。
 - 普通拖动：沿用原生移动。
 - 按住 `Ctrl` 拖动到另一文件夹：复制；同名文件夹会合并，同名文件会出现整批处理对话框。
 
