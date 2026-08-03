@@ -2,6 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { VaultCopyService } from "./copy-service";
 import { MoveDiagnostics } from "./diagnostics";
 import { ExplorerTabMoveController, getLeafId, isValidLeftExplorer } from "./explorer-reorder";
+import { ExplorerViewIsolationController } from "./explorer-selection";
 import { LastExplorerCloseGuard } from "./last-explorer-close-guard";
 import {
   ensureLeftExplorersUseTabs,
@@ -36,6 +37,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private headerControl: ExplorerHeaderControl | null = null;
   private copyDragController: ExplorerCopyDragController | null = null;
   private moveController: ExplorerTabMoveController | null = null;
+  private explorerIsolationController: ExplorerViewIsolationController | null = null;
   private closeGuard: LastExplorerCloseGuard | null = null;
   private popoutRegistry: PopoutExplorerRegistry | null = null;
   private diagnostics: MoveDiagnostics | null = null;
@@ -72,6 +74,21 @@ export default class FileExplorerSplitPlugin extends Plugin {
       this.app,
       new VaultCopyService(this.app),
       () => this.getInteractiveExplorerLeaves(),
+      () => {
+        this.explorerIsolationController?.restoreDragSelection();
+        this.explorerIsolationController?.scheduleCapture();
+      },
+      {
+        onDragStart: (source, paths) => this.explorerIsolationController?.beginDragSelection(source, paths),
+        onDrop: (target) => this.explorerIsolationController?.captureDragDrop(target),
+        onDropComplete: () => this.explorerIsolationController?.completeDragSelection(),
+        onCancel: () => this.explorerIsolationController?.cancelDragSelection(),
+        onUserInteraction: () => this.explorerIsolationController?.cancelDragSelectionAfterUserInput(),
+      },
+    );
+    this.explorerIsolationController = new ExplorerViewIsolationController(
+      () => this.getInteractiveExplorerLeaves(),
+      (event, details) => this.diagnostics?.log(event, details),
     );
     this.moveController = new ExplorerTabMoveController(
       this.app,
@@ -89,6 +106,15 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => {
       this.queueRefresh();
       this.queueMinimumExplorerCheck();
+    }));
+    this.registerEvent(this.app.workspace.on("file-open", (file) => {
+      this.explorerIsolationController?.handleFileOpen(file?.path);
+    }));
+    this.registerEvent(this.app.vault.on("rename", () => {
+      this.explorerIsolationController?.scheduleCapture();
+    }));
+    this.registerEvent(this.app.vault.on("delete", () => {
+      this.explorerIsolationController?.scheduleCapture();
     }));
     this.registerEvent(this.app.workspace.on("window-open", () => {
       this.diagnostics?.log("popout.window-open");
@@ -112,6 +138,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.headerControl?.unload();
     this.copyDragController?.unload();
     this.moveController?.unload();
+    this.explorerIsolationController?.unload();
     this.closeGuard?.unload();
   }
 
@@ -132,6 +159,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private refreshAdapters(): void {
     this.headerControl?.start();
     this.headerControl?.refresh();
+    this.explorerIsolationController?.refresh();
     this.copyDragController?.refresh();
     this.moveController?.refresh();
     this.closeGuard?.refresh();
@@ -144,6 +172,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
       this.headerControl?.refresh();
+      this.explorerIsolationController?.refresh();
       this.copyDragController?.refresh();
       this.moveController?.refresh();
       this.closeGuard?.refresh();
@@ -200,6 +229,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
     });
     await this.app.workspace.revealLeaf(newLeaf);
     this.app.workspace.setActiveLeaf(newLeaf, { focus: true });
+    this.explorerIsolationController?.initializeLeafFrom(source, newLeaf);
     this.queueRefresh();
   }
 
@@ -474,6 +504,7 @@ export default class FileExplorerSplitPlugin extends Plugin {
   private hasRestoreMismatch(comparison: ReturnType<typeof compareNativeExplorerState>): boolean {
     return comparison.collapsedMismatches.length > 0
       || comparison.missingVisibleFolders.length > 0
+      || !comparison.selection.matches
       || Math.abs(comparison.scrollTopDelta) > 2;
   }
 

@@ -1,5 +1,17 @@
 import { App, Notice, Plugin, TAbstractFile, TFile, TFolder, ViewState, WorkspaceLeaf, setIcon } from "obsidian";
 import { VaultCopyService } from "./copy-service";
+import { ExplorerDragScrollGuard } from "./drag-scroll-guard";
+import {
+  captureNativeExplorerSelection,
+  compareNativeExplorerSelection,
+  captureNativeExplorerFolders,
+  restoreNativeExplorerFolders,
+  restoreNativeExplorerSelection,
+  type NativeExplorerFolderSnapshot,
+  type NativeExplorerSelectionComparison,
+  type NativeExplorerSelectionRestoreReport,
+  type NativeExplorerSelectionSnapshot,
+} from "./explorer-selection";
 import { FILE_EXPLORER_VIEW_TYPE, type DragSelection, type NativeExplorerView } from "./types";
 
 type SplitHandler = () => void;
@@ -8,25 +20,48 @@ interface PendingCopyDrag extends DragSelection {
   startedAt: number;
 }
 
-interface FolderDomState {
-  path: string;
-  collapsed: boolean;
+type DragScrollRestoreHandler = () => void;
+
+/**
+ * 拖放选择隔离回调，连接原生拖放与每个视图的选择会话。
+ * Drag selection isolation callbacks connecting native drag-and-drop to per-view selection sessions.
+ */
+export interface ExplorerDragIsolationCallbacks {
+  onDragStart?: (source: WorkspaceLeaf, paths: string[]) => void;
+  onDrop?: (target: WorkspaceLeaf) => void;
+  onDropComplete?: () => void;
+  onCancel?: () => void;
+  onUserInteraction?: () => void;
 }
 
+/**
+ * Captured native explorer state used while Obsidian rebuilds a workspace tree.
+ * 在 Obsidian 重建工作区树时使用的原生文件列表状态快照。
+ */
 export interface NativeExplorerStateSnapshot {
   viewState: ViewState;
   ephemeralState: unknown;
-  folders: FolderDomState[];
+  folders: NativeExplorerFolderSnapshot[];
   scrollTop: number;
+  selection: NativeExplorerSelectionSnapshot;
 }
 
+/**
+ * Reports which native explorer state portions were restored.
+ * 报告原生文件列表各部分状态的恢复结果。
+ */
 export interface NativeExplorerRestoreReport {
   navigatorFound: boolean;
   expandedFoldersRestored: number;
   collapsedFoldersRestored: number;
   scrollTop: number;
+  selection: NativeExplorerSelectionRestoreReport;
 }
 
+/**
+ * Compares expected native explorer state with the currently rendered state.
+ * 比较预期的原生文件列表状态与当前渲染状态。
+ */
 export interface NativeExplorerStateComparison {
   expectedFolderCount: number;
   observedFolderCount: number;
@@ -38,6 +73,7 @@ export interface NativeExplorerStateComparison {
   expectedScrollTop: number;
   observedScrollTop: number;
   scrollTopDelta: number;
+  selection: NativeExplorerSelectionComparison;
 }
 
 export function isNativeExplorer(leaf: WorkspaceLeaf): boolean {
@@ -70,19 +106,12 @@ export function getExplorerView(leaf: WorkspaceLeaf): NativeExplorerView | null 
 export function captureNativeExplorerState(leaf: WorkspaceLeaf): NativeExplorerStateSnapshot {
   const view = getExplorerView(leaf);
   const navigator = view?.navFileContainerEl ?? view?.containerEl;
-  const folders: FolderDomState[] = [];
-  for (const folder of Array.from(navigator?.querySelectorAll<HTMLElement>(".nav-folder") ?? [])) {
-    const title = getFolderTitle(folder);
-    const path = title?.dataset.path;
-    if (path) {
-      folders.push({ path, collapsed: folder.classList.contains("is-collapsed") });
-    }
-  }
   return {
     viewState: cloneState(leaf.getViewState()),
     ephemeralState: cloneState(leaf.getEphemeralState()),
-    folders,
+    folders: captureNativeExplorerFolders(view),
     scrollTop: navigator?.scrollTop ?? 0,
+    selection: captureNativeExplorerSelection(leaf),
   };
 }
 
@@ -133,6 +162,7 @@ export function compareNativeExplorerState(
     expectedScrollTop: expected.scrollTop,
     observedScrollTop: observed.scrollTop,
     scrollTopDelta: observed.scrollTop - expected.scrollTop,
+    selection: compareNativeExplorerSelection(expected.selection, observed.selection),
   };
 }
 
@@ -157,51 +187,22 @@ export async function restoreNativeExplorerState(
       expandedFoldersRestored: 0,
       collapsedFoldersRestored: 0,
       scrollTop: 0,
+      selection: restoreNativeExplorerSelection(leaf, snapshot.selection),
     };
   }
-  const states = new Map(snapshot.folders.map((folder) => [folder.path, folder]));
-  const orderedPaths = [...states.keys()].sort((a, b) => a.split("/").length - b.split("/").length);
-  let expandedFoldersRestored = 0;
-  let collapsedFoldersRestored = 0;
-
-  // Expand required ancestors first so their descendants are available in the DOM.
-  for (const path of orderedPaths) {
-    const desired = states.get(path);
-    const folder = findFolderByPath(navigator, path);
-    if (desired && folder?.classList.contains("is-collapsed") && !desired.collapsed) {
-      getFolderTitle(folder)?.click();
-      expandedFoldersRestored += 1;
-    }
-  }
-  // Collapse from deep to shallow so the visible tree matches the source pane.
-  for (const path of orderedPaths.reverse()) {
-    const desired = states.get(path);
-    const folder = findFolderByPath(navigator, path);
-    if (desired && folder && !folder.classList.contains("is-collapsed") && desired.collapsed) {
-      getFolderTitle(folder)?.click();
-      collapsedFoldersRestored += 1;
-    }
-  }
+  const folderRestore = restoreNativeExplorerFolders(view, snapshot.folders);
   navigator.scrollTop = snapshot.scrollTop;
+  const selection = restoreNativeExplorerSelection(leaf, snapshot.selection);
   return {
     navigatorFound: true,
-    expandedFoldersRestored,
-    collapsedFoldersRestored,
+    expandedFoldersRestored: folderRestore.expandedFoldersRestored,
+    collapsedFoldersRestored: folderRestore.collapsedFoldersRestored,
     scrollTop: snapshot.scrollTop,
+    selection,
   };
 }
 
-function getFolderTitle(folder: HTMLElement): HTMLElement | null {
-  return folder.querySelector<HTMLElement>(":scope > .nav-folder-title[data-path]")
-    ?? folder.querySelector<HTMLElement>(":scope > [data-path]");
-}
-
-function findFolderByPath(container: HTMLElement, path: string): HTMLElement | null {
-  return Array.from(container.querySelectorAll<HTMLElement>(".nav-folder"))
-    .find((folder) => getFolderTitle(folder)?.dataset.path === path) ?? null;
-}
-
-function hasCollapsedAncestor(path: string, folders: Map<string, FolderDomState>): boolean {
+function hasCollapsedAncestor(path: string, folders: Map<string, NativeExplorerFolderSnapshot>): boolean {
   const segments = path.split("/");
   for (let index = 1; index < segments.length; index += 1) {
     const ancestor = folders.get(segments.slice(0, index).join("/"));
@@ -272,14 +273,26 @@ export class ExplorerHeaderControl {
 
 export class ExplorerCopyDragController {
   private readonly cleanups = new Map<HTMLElement, () => void>();
+  private readonly dragScrollGuard: ExplorerDragScrollGuard;
   private pending: PendingCopyDrag | null = null;
+  private dragSelection: DragSelection | null = null;
+  private dragSessionId: number | null = null;
+  private dropSessionId: number | null = null;
+  private copyInFlightSessionId: number | null = null;
   private highlighted: HTMLElement | null = null;
 
   constructor(
     private readonly app: App,
     private readonly copyService: VaultCopyService,
     private readonly getInteractiveLeaves: () => WorkspaceLeaf[] = () => getLeftExplorerLeaves(this.app),
-  ) {}
+    onDragScrollRestored: DragScrollRestoreHandler = () => undefined,
+    private readonly dragIsolation?: ExplorerDragIsolationCallbacks,
+  ) {
+    this.dragScrollGuard = new ExplorerDragScrollGuard(
+      this.getInteractiveLeaves,
+      onDragScrollRestored,
+    );
+  }
 
   refresh(): void {
     const currentContainers = new Set<HTMLElement>();
@@ -307,6 +320,9 @@ export class ExplorerCopyDragController {
       cleanup();
     }
     this.cleanups.clear();
+    this.dragScrollGuard.unload();
+    this.dragIsolation?.onCancel?.();
+    this.dragSelection = null;
     this.clearPending();
   }
 
@@ -314,31 +330,72 @@ export class ExplorerCopyDragController {
     const onDragStart = (event: DragEvent) => this.captureDragStart(leaf, view, event);
     const onDragOver = (event: DragEvent) => this.captureDragOver(leaf, view, event);
     const onDrop = (event: DragEvent) => this.captureDrop(leaf, view, event);
-    const onDragEnd = () => this.clearPendingSoon();
+    const onDragEnd = () => {
+      const dragSessionId = this.dragSessionId;
+      const hasDrop = dragSessionId !== null && this.dropSessionId === dragSessionId;
+      if (this.copyInFlightSessionId !== this.dragSessionId) {
+        this.dragScrollGuard.completeDrop(this.dragSessionId ?? undefined);
+        if (hasDrop) {
+          this.dragIsolation?.onDropComplete?.();
+        } else {
+          this.dragIsolation?.onCancel?.();
+        }
+      }
+      this.dragSessionId = null;
+      this.dropSessionId = null;
+      this.dragSelection = null;
+      this.clearPendingSoon();
+    };
+    const onPointerDown = () => {
+      this.dragScrollGuard.cancelPendingRestore();
+      this.dragIsolation?.onUserInteraction?.();
+    };
+    const onWheel = () => {
+      this.dragScrollGuard.cancelPendingRestore();
+      this.dragIsolation?.onUserInteraction?.();
+    };
 
     view.containerEl.addEventListener("dragstart", onDragStart, true);
     view.containerEl.addEventListener("dragover", onDragOver, true);
     view.containerEl.addEventListener("drop", onDrop, true);
     view.containerEl.addEventListener("dragend", onDragEnd, true);
+    view.containerEl.addEventListener("pointerdown", onPointerDown, true);
+    view.containerEl.addEventListener("wheel", onWheel, true);
 
     this.cleanups.set(view.containerEl, () => {
       view.containerEl.removeEventListener("dragstart", onDragStart, true);
       view.containerEl.removeEventListener("dragover", onDragOver, true);
       view.containerEl.removeEventListener("drop", onDrop, true);
       view.containerEl.removeEventListener("dragend", onDragEnd, true);
+      view.containerEl.removeEventListener("pointerdown", onPointerDown, true);
+      view.containerEl.removeEventListener("wheel", onWheel, true);
     });
   }
 
   private captureDragStart(leaf: WorkspaceLeaf, view: NativeExplorerView, event: DragEvent): void {
+    this.copyInFlightSessionId = null;
+    const selection = this.resolveDraggedSelection(leaf, view, event);
+    if (!selection) {
+      this.dragSessionId = null;
+      this.dropSessionId = null;
+      this.dragSelection = null;
+      this.dragScrollGuard.cancelPendingRestore();
+      this.dragIsolation?.onCancel?.();
+      if (!event.ctrlKey) {
+        this.clearPending();
+      }
+      return;
+    }
+
+    this.dragSessionId = this.dragScrollGuard.beginDrag();
+    this.dropSessionId = null;
+    this.dragSelection = selection;
+    this.dragIsolation?.onDragStart?.(leaf, selection.paths);
     if (!event.ctrlKey) {
       this.clearPending();
       return;
     }
 
-    const selection = this.resolveDraggedSelection(leaf, view, event);
-    if (!selection) {
-      return;
-    }
     this.pending = { ...selection, startedAt: Date.now() };
     if (event.dataTransfer) {
       event.dataTransfer.dropEffect = "copy";
@@ -363,7 +420,12 @@ export class ExplorerCopyDragController {
     this.setHighlighted(this.findDropElement(event.target, view));
   }
 
-  private captureDrop(_leaf: WorkspaceLeaf, view: NativeExplorerView, event: DragEvent): void {
+  private captureDrop(leaf: WorkspaceLeaf, view: NativeExplorerView, event: DragEvent): void {
+    this.dragScrollGuard.captureDrop(this.dragSessionId ?? undefined);
+    if (this.dragSessionId !== null && this.dragSelection && this.dropSessionId !== this.dragSessionId) {
+      this.dropSessionId = this.dragSessionId;
+      this.dragIsolation?.onDrop?.(leaf);
+    }
     if (!this.pending || !event.ctrlKey) {
       return;
     }
@@ -373,14 +435,30 @@ export class ExplorerCopyDragController {
     }
 
     const pending = this.pending;
+    const copySessionId = this.dragSessionId;
+    this.copyInFlightSessionId = copySessionId;
     event.preventDefault();
     event.stopImmediatePropagation();
     this.clearPending();
 
-    void this.copyService.copyIntoFolder(pending.files, destination).catch((error: unknown) => {
-      console.error("[File Explorer Split] Copy failed", error);
-      new Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
-    });
+    void this.copyService.copyIntoFolder(pending.files, destination)
+      .catch((error: unknown) => {
+        console.error("[File Explorer Split] Copy failed", error);
+        new Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        const ownsCopySession = this.copyInFlightSessionId === copySessionId;
+        if (ownsCopySession) {
+          this.copyInFlightSessionId = null;
+        }
+        if (!ownsCopySession) {
+          return;
+        }
+        this.dragScrollGuard.completeDrop(copySessionId ?? undefined);
+        if (copySessionId !== null) {
+          this.dragIsolation?.onDropComplete?.();
+        }
+      });
   }
 
   private resolveDraggedSelection(
@@ -389,8 +467,8 @@ export class ExplorerCopyDragController {
     event: DragEvent,
   ): DragSelection | null {
     const selectedPaths = new Set<string>();
-    for (const element of view.tree?.selectedDoms ?? []) {
-      const path = this.pathFromElement(element);
+    for (const item of view.tree?.selectedDoms ?? []) {
+      const path = item.file?.path ?? this.pathFromElement(item.selfEl);
       if (path) {
         selectedPaths.add(path);
       }

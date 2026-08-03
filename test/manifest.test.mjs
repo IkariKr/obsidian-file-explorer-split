@@ -17,6 +17,7 @@ test("plugin manifest identifies a desktop-only native file explorer plugin", as
 test("source contains native explorer split, Ctrl-copy, drag-move, popout, and final-explorer guard adapters", async () => {
   const main = await readFile(new URL("src/main.ts", root), "utf8");
   const adapter = await readFile(new URL("src/native-explorer.ts", root), "utf8");
+  const isolation = await readFile(new URL("src/explorer-selection.ts", root), "utf8");
   const moveAdapter = await readFile(new URL("src/explorer-reorder.ts", root), "utf8");
   const diagnostics = await readFile(new URL("src/diagnostics.ts", root), "utf8");
   const closeGuard = await readFile(new URL("src/last-explorer-close-guard.ts", root), "utf8");
@@ -24,11 +25,22 @@ test("source contains native explorer split, Ctrl-copy, drag-move, popout, and f
 
   assert.match(main, /createLeafBySplit/);
   assert.match(main, /LastExplorerCloseGuard/);
+  assert.match(main, /ExplorerViewIsolationController/);
+  assert.match(main, /handleFileOpen/);
   assert.match(main, /file-explorer/);
   assert.match(adapter, /event\.ctrlKey/);
   assert.match(adapter, /CopyDragController/);
   assert.match(adapter, /captureNativeExplorerState/);
   assert.match(adapter, /restoreNativeExplorerState/);
+  assert.match(adapter, /captureNativeExplorerSelection/);
+  assert.match(adapter, /restoreNativeExplorerSelection/);
+  assert.match(adapter, /ExplorerDragScrollGuard/);
+  assert.match(adapter, /scrollTop/);
+  assert.match(isolation, /ExplorerViewIsolationController/);
+  assert.match(isolation, /captureNativeExplorerFolders/);
+  assert.match(isolation, /restoreNativeExplorerFolders/);
+  assert.match(isolation, /addEventListener\("scroll"/);
+  assert.match(isolation, /requestAnimationFrame/);
   assert.match(moveAdapter, /ExplorerTabMoveController/);
   assert.match(moveAdapter, /"bottom"/);
   assert.match(moveAdapter, /"right"/);
