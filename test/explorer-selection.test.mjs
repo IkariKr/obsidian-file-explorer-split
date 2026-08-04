@@ -16,6 +16,7 @@ const {
   captureNativeExplorerSelection,
   captureNativeExplorerFolders,
   restoreNativeExplorerFolders,
+  restoreNativeExplorerFoldersSettled,
   restoreNativeExplorerSelection,
 } = module.exports;
 
@@ -40,6 +41,7 @@ class FakeClassList {
 class FakeElement {
   constructor() {
     this.nodeType = 1;
+    this.isConnected = true;
     this.classList = new FakeClassList();
     this.dataset = {};
     this.listeners = new Map();
@@ -64,7 +66,13 @@ class FakeElement {
   }
 
   closest(selector) {
-    return selector === ".nav-file-title" && this.classList.contains("nav-file-title") ? this : null;
+    if (selector === ".nav-file-title" && this.classList.contains("nav-file-title")) {
+      return this;
+    }
+    if (selector === ".nav-folder-title" && this.classList.contains("nav-folder-title")) {
+      return this;
+    }
+    return null;
   }
 
   querySelector(selector) {
@@ -107,6 +115,22 @@ function folder(path, collapsed) {
     }
   };
   return folderEl;
+}
+
+function nativeFolderItem(path, collapsed, onSetCollapsed = () => undefined) {
+  const selfEl = new FakeElement();
+  selfEl.dataset.path = path;
+  selfEl.classList.add("nav-folder-title");
+  const item = {
+    file: { path, children: [] },
+    selfEl,
+    collapsed,
+    setCollapsed(value, updateFlag) {
+      item.collapsed = value;
+      return onSetCollapsed(value, updateFlag);
+    },
+  };
+  return item;
 }
 
 function leaf(id, paths, folderStates = []) {
@@ -369,6 +393,97 @@ test("captures and restores nested folder expansion in shallow/deep order", () =
   assert.equal(report.expandedFoldersRestored, 2);
   assert.equal(report.collapsedFoldersRestored, 1);
   assert.deepEqual(folderState(explorer), snapshot);
+});
+
+test("captures virtualized folder states from fileItems outside the DOM", () => {
+  const explorer = leaf("explorer", ["A.md"], [["Visible", false]]);
+  explorer.view.fileItems["Visible"] = nativeFolderItem("Visible", false);
+  explorer.view.fileItems["Offscreen"] = nativeFolderItem("Offscreen", true);
+
+  const snapshot = captureNativeExplorerFolders(explorer.view);
+
+  assert.deepEqual(snapshot, [
+    { path: "Visible", collapsed: false },
+    { path: "Offscreen", collapsed: true },
+  ]);
+});
+
+test("settles native async folder restoration before the caller continues", async () => {
+  let resolveCollapse;
+  const explorer = leaf("explorer", ["A.md"], []);
+  const itemValue = nativeFolderItem("Projects", true, () => new Promise((resolve) => {
+    resolveCollapse = resolve;
+  }));
+  explorer.view.fileItems["Projects"] = itemValue;
+  explorer.view.containerEl.scrollTop = 420;
+  const task = restoreNativeExplorerFoldersSettled(explorer.view, [
+    { path: "Projects", collapsed: false },
+  ]);
+
+  assert.equal(itemValue.collapsed, false);
+  let settled = false;
+  void task.then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  resolveCollapse();
+  await task;
+  assert.equal(settled, true);
+  assert.equal(itemValue.collapsed, false);
+});
+
+test("does not replay an async folder restore during repeated file-open corrections", async () => {
+  let resolveRestore;
+  let restoreCalls = 0;
+  const explorer = leaf("explorer", ["A.md"], []);
+  const itemValue = nativeFolderItem("Projects", true, () => {
+    restoreCalls += 1;
+    explorer.view.containerEl.scrollTop = 999;
+    explorer.view.containerEl.dispatch("scroll", { target: explorer.view.containerEl });
+    return new Promise((resolve) => {
+      resolveRestore = resolve;
+    });
+  });
+  explorer.view.fileItems["Projects"] = itemValue;
+  explorer.view.containerEl.scrollTop = 700;
+
+  const controller = new ExplorerViewIsolationController(() => [explorer]);
+  controller.refresh();
+  itemValue.collapsed = false;
+  controller.handleFileOpen("A.md");
+  controller.handleFileOpen("A.md");
+
+  assert.equal(restoreCalls, 1);
+  resolveRestore();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(explorer.view.containerEl.scrollTop, 700);
+});
+
+test("captures a user's virtualized folder toggle after native scrolling settles", async () => {
+  const explorer = leaf("explorer", ["A.md"], []);
+  const itemValue = nativeFolderItem("Projects", true);
+  explorer.view.fileItems["Projects"] = itemValue;
+  explorer.view.containerEl.scrollTop = 900;
+
+  const controller = new ExplorerViewIsolationController(() => [explorer]);
+  controller.refresh();
+  explorer.view.containerEl.scrollTop = 760;
+  explorer.view.containerEl.dispatch("scroll", { target: explorer.view.containerEl });
+  assert.equal(controller.states.get("explorer").scrollTop, 760);
+  itemValue.collapsed = false;
+  explorer.view.containerEl.scrollTop = 680;
+  explorer.view.containerEl.dispatch("pointerdown", {
+    button: 0,
+    target: itemValue.selfEl,
+  });
+  explorer.view.containerEl.dispatch("click", { target: itemValue.selfEl });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const state = controller.states.get("explorer");
+  assert.equal(state.scrollTop, 680);
+  assert.deepEqual(state.folders, [{ path: "Projects", collapsed: false }]);
 });
 
 test("ignores missing folder paths while restoring expansion", () => {

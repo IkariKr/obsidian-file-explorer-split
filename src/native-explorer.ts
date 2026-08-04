@@ -5,7 +5,7 @@ import {
   captureNativeExplorerSelection,
   compareNativeExplorerSelection,
   captureNativeExplorerFolders,
-  restoreNativeExplorerFolders,
+  restoreNativeExplorerFoldersSettled,
   restoreNativeExplorerSelection,
   type NativeExplorerFolderSnapshot,
   type NativeExplorerSelectionComparison,
@@ -190,7 +190,9 @@ export async function restoreNativeExplorerState(
       selection: restoreNativeExplorerSelection(leaf, snapshot.selection),
     };
   }
-  const folderRestore = restoreNativeExplorerFolders(view, snapshot.folders);
+  const folderRestore = await restoreNativeExplorerFoldersSettled(view, snapshot.folders);
+  await nextFrame();
+  await nextFrame();
   navigator.scrollTop = snapshot.scrollTop;
   const selection = restoreNativeExplorerSelection(leaf, snapshot.selection);
   return {

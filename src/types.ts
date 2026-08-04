@@ -11,6 +11,17 @@ export type SplitDirection = "vertical" | "horizontal";
 export interface NativeExplorerTreeItem {
   file?: TAbstractFile;
   selfEl?: HTMLElement;
+  /** 原生文件夹节点的私有折叠状态。 / Native folder item's private collapsed state. */
+  collapsed?: boolean;
+  /**
+   * 原生文件夹节点的异步折叠 API。
+   * Native folder item's asynchronous collapse API.
+   *
+   * Obsidian does not expose this method in its public typings; callers must
+   * detect it at runtime and retain a DOM fallback for older builds.
+   * Obsidian 未在公开类型中暴露此方法；调用方必须运行时检测，并为旧版本保留 DOM fallback。
+   */
+  setCollapsed?: (collapsed: boolean, updateFlag?: boolean) => void | Promise<void>;
 }
 
 /**

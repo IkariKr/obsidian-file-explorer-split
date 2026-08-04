@@ -58,6 +58,16 @@ export interface NativeExplorerFolderRestoreReport {
   missingPaths: string[];
 }
 
+/**
+ * 文件夹恢复任务及其最终完成状态。
+ * Folder restore task and its eventual completion state.
+ */
+export interface NativeExplorerFolderRestoreTask {
+  report: NativeExplorerFolderRestoreReport;
+  settled: Promise<NativeExplorerFolderRestoreReport>;
+  pending: boolean;
+}
+
 interface LeafIsolationSnapshot {
   revision: number;
   snapshot: ExplorerIsolationSnapshot;
@@ -76,6 +86,12 @@ interface DragSelectionIsolationSession {
   targetId: string | null;
   paths: string[];
   snapshots: Map<string, LeafIsolationSnapshot>;
+}
+
+interface ExplorerIsolationRestoreTask {
+  pending: boolean;
+  report: NativeExplorerSelectionRestoreReport | null;
+  settled: Promise<NativeExplorerSelectionRestoreReport>;
 }
 
 type InteractiveLeavesProvider = () => WorkspaceLeaf[];
@@ -98,13 +114,18 @@ export interface ExplorerIsolationSnapshot {
 }
 
 /**
- * 捕获当前文件列表中可见文件夹的展开状态，不保留 DOM 引用。
- * Captures visible folder expansion state without retaining DOM references.
+ * 捕获当前文件列表中全部可用文件夹的展开状态，不保留 DOM 引用。
+ * Captures all available folder expansion states without retaining DOM references.
  */
 export function captureNativeExplorerFolders(
   view: NativeExplorerView | null | undefined,
 ): NativeExplorerFolderSnapshot[] {
   const navigator = view ? getExplorerNavigator(view) : null;
+  const nativeFolders = captureNativeFolderItems(view);
+  if (nativeFolders.length > 0) {
+    return nativeFolders;
+  }
+
   const folders: NativeExplorerFolderSnapshot[] = [];
   for (const folder of Array.from(navigator?.querySelectorAll<HTMLElement>(".nav-folder") ?? [])) {
     const path = getFolderTitle(folder)?.dataset.path;
@@ -118,55 +139,147 @@ export function captureNativeExplorerFolders(
 /**
  * 按文件夹路径恢复展开状态，忽略不存在或暂不可见的节点。
  * Restores folder expansion by path while ignoring missing or temporarily hidden nodes.
+ *
+ * This synchronous compatibility entry point starts native asynchronous updates
+ * but does not wait for them. Runtime isolation uses the settled variant below.
+ * 此同步兼容入口会启动原生异步更新但不等待；运行时隔离使用下方可等待版本。
  */
 export function restoreNativeExplorerFolders(
   view: NativeExplorerView | null | undefined,
   snapshot: NativeExplorerFolderSnapshot[] | undefined,
 ): NativeExplorerFolderRestoreReport {
+  const task = startNativeExplorerFolderRestore(view, snapshot);
+  void task.settled;
+  return task.report;
+}
+
+/**
+ * 启动文件夹恢复并暴露异步完成状态，供滚动校正流程使用。
+ * Starts folder restoration and exposes completion for scroll correction.
+ */
+export function beginNativeExplorerFolderRestore(
+  view: NativeExplorerView | null | undefined,
+  snapshot: NativeExplorerFolderSnapshot[] | undefined,
+): NativeExplorerFolderRestoreTask {
+  return startNativeExplorerFolderRestore(view, snapshot);
+}
+
+/**
+ * 等待原生文件夹折叠/展开和虚拟树节点更新完成。
+ * Waits for native folder collapse/expand and virtual-tree updates to finish.
+ */
+export function restoreNativeExplorerFoldersSettled(
+  view: NativeExplorerView | null | undefined,
+  snapshot: NativeExplorerFolderSnapshot[] | undefined,
+): Promise<NativeExplorerFolderRestoreReport> {
+  return startNativeExplorerFolderRestore(view, snapshot).settled;
+}
+
+function startNativeExplorerFolderRestore(
+  view: NativeExplorerView | null | undefined,
+  snapshot: NativeExplorerFolderSnapshot[] | undefined,
+): NativeExplorerFolderRestoreTask {
   const desired = snapshot ?? [];
   const navigator = view ? getExplorerNavigator(view) : null;
   if (!navigator) {
-    return {
+    const report = {
       supported: false,
       expandedFoldersRestored: 0,
       collapsedFoldersRestored: 0,
       missingPaths: uniquePaths(desired.map((folder) => folder.path)),
     };
+    return { report, settled: Promise.resolve(report), pending: false };
   }
 
   const states = new Map(desired.map((folder) => [folder.path, folder]));
   const orderedPaths = [...states.keys()].sort(comparePathDepth);
-  let expandedFoldersRestored = 0;
-  let collapsedFoldersRestored = 0;
-
-  for (const path of orderedPaths) {
-    const desiredFolder = states.get(path);
-    const folder = findFolderByPath(navigator, path);
-    const title = folder ? getFolderTitle(folder) : null;
-    if (desiredFolder && folder?.classList.contains("is-collapsed") === true
-      && !desiredFolder.collapsed && title && typeof title.click === "function") {
-      title.click();
-      expandedFoldersRestored += 1;
-    }
-  }
-
-  for (const path of [...orderedPaths].reverse()) {
-    const desiredFolder = states.get(path);
-    const folder = findFolderByPath(navigator, path);
-    const title = folder ? getFolderTitle(folder) : null;
-    if (desiredFolder && folder && !folder.classList.contains("is-collapsed")
-      && desiredFolder.collapsed && title && typeof title.click === "function") {
-      title.click();
-      collapsedFoldersRestored += 1;
-    }
-  }
-
-  return {
+  const actions = createFolderRestoreActions(view ?? undefined, navigator, states, orderedPaths);
+  const report: NativeExplorerFolderRestoreReport = {
     supported: true,
-    expandedFoldersRestored,
-    collapsedFoldersRestored,
-    missingPaths: orderedPaths.filter((path) => !findFolderByPath(navigator, path)),
+    expandedFoldersRestored: actions.filter((action) => !action.collapsed && action.target).length,
+    collapsedFoldersRestored: actions.filter((action) => action.collapsed && action.target).length,
+    missingPaths: actions.filter((action) => !action.target).map((action) => action.path),
   };
+
+  const task: NativeExplorerFolderRestoreTask = {
+    report,
+    settled: Promise.resolve(report),
+    pending: false,
+  };
+  const settled = applyFolderRestoreActions(actions, () => {
+    task.pending = true;
+  }).then(() => ({
+    ...report,
+    missingPaths: actions.filter((action) => !action.target).map((action) => action.path),
+  }));
+  task.settled = settled;
+  return task;
+}
+
+interface FolderRestoreAction {
+  path: string;
+  collapsed: boolean;
+  target: NativeExplorerTreeItem | HTMLElement | null;
+}
+
+function createFolderRestoreActions(
+  view: NativeExplorerView | undefined,
+  navigator: HTMLElement,
+  states: Map<string, NativeExplorerFolderSnapshot>,
+  orderedPaths: string[],
+): FolderRestoreAction[] {
+  const actions: FolderRestoreAction[] = [];
+  for (const path of orderedPaths) {
+    const desired = states.get(path);
+    if (!desired) {
+      continue;
+    }
+    const item = view ? getFolderItem(view, path) : null;
+    const folder = findFolderByPath(navigator, path);
+    const currentCollapsed = item && typeof item.collapsed === "boolean"
+      ? item.collapsed
+      : folder?.classList.contains("is-collapsed");
+    if (currentCollapsed === undefined) {
+      actions.push({ path, collapsed: desired.collapsed, target: null });
+      continue;
+    }
+    if (currentCollapsed !== desired.collapsed) {
+      actions.push({
+        path,
+        collapsed: desired.collapsed,
+        target: item ?? folder,
+      });
+    }
+  }
+  const collapseActions = actions.filter((action) => action.collapsed).reverse();
+  const expandActions = actions.filter((action) => !action.collapsed);
+  return [...expandActions, ...collapseActions];
+}
+
+async function applyFolderRestoreActions(
+  actions: FolderRestoreAction[],
+  onPending: () => void,
+): Promise<void> {
+  for (const action of actions) {
+    try {
+      if (isNativeFolderItem(action.target) && typeof action.target.setCollapsed === "function") {
+        const result = action.target.setCollapsed(action.collapsed, false);
+        if (isPromiseLike(result)) {
+          onPending();
+          await result;
+        }
+        continue;
+      }
+      const folder = action.target as HTMLElement | null;
+      const title = folder ? getFolderTitle(folder) : null;
+      if (title && typeof title.click === "function") {
+        title.click();
+      }
+    } catch {
+      // 私有运行时字段可能在不同 Obsidian 版本中失效，继续恢复其余视图状态。
+      // Private runtime fields can fail across Obsidian versions; continue restoring other state.
+    }
+  }
 }
 
 /**
@@ -288,6 +401,9 @@ export class ExplorerViewIsolationController {
   private readonly states = new Map<string, ExplorerIsolationSnapshot>();
   private readonly revisions = new Map<string, number>();
   private readonly scheduledLeaves = new Set<string>();
+  private readonly restoringLeaves = new Set<string>();
+  private readonly restoreGenerations = new Map<string, number>();
+  private readonly activeRestoreSnapshots = new Map<string, ExplorerIsolationSnapshot>();
   private readonly suppressedAutoReveal = new Map<string, boolean>();
   private pendingOpens: PendingFileOpen[] = [];
   private dragSelectionSession: DragSelectionIsolationSession | null = null;
@@ -318,8 +434,7 @@ export class ExplorerViewIsolationController {
       activeContainers.add(view.containerEl);
       const existing = this.states.get(leafId);
       if (existing) {
-        const report = restoreExplorerIsolationState(leaf, existing);
-        this.logUnsupported(leafId, report);
+        this.restoreLeafState(leaf, existing);
       } else {
         this.states.set(leafId, captureExplorerIsolationState(leaf));
         this.revisions.set(leafId, 0);
@@ -357,6 +472,9 @@ export class ExplorerViewIsolationController {
     this.states.clear();
     this.revisions.clear();
     this.scheduledLeaves.clear();
+    this.restoringLeaves.clear();
+    this.restoreGenerations.clear();
+    this.activeRestoreSnapshots.clear();
     this.suppressedAutoReveal.clear();
     this.pendingOpens = [];
     this.clearDragSelectionSession();
@@ -429,7 +547,7 @@ export class ExplorerViewIsolationController {
    */
   rememberLeaf(leaf: WorkspaceLeaf): void {
     const leafId = getLeafId(leaf);
-    if (!leafId) {
+    if (!leafId || this.restoringLeaves.has(leafId)) {
       return;
     }
     this.states.set(leafId, captureExplorerIsolationState(leaf));
@@ -512,8 +630,7 @@ export class ExplorerViewIsolationController {
       if (!before) {
         continue;
       }
-      restoreNativeExplorerFolders(getSelectionView(leaf), before.snapshot.folders);
-      restoreNativeExplorerSelection(leaf, before.snapshot.selection);
+      this.restoreLeafState(leaf, before.snapshot);
     }
     this.captureCurrentStates();
   }
@@ -576,13 +693,16 @@ export class ExplorerViewIsolationController {
     const snapshot = captureExplorerIsolationState(source);
     this.states.set(targetId, cloneIsolationSnapshot(snapshot));
     this.revisions.set(targetId, 0);
-    const report = restoreExplorerIsolationState(target, snapshot);
-    this.logUnsupported(targetId, report);
+    this.restoreLeafState(target, snapshot);
   }
 
   private attach(leaf: WorkspaceLeaf, view: NativeExplorerView): void {
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 && event.button !== 1) {
+        return;
+      }
+      this.cancelLeafRestore(leaf);
+      if (isFolderTarget(event.target)) {
         return;
       }
       const path = filePathFromTarget(event.target);
@@ -596,49 +716,81 @@ export class ExplorerViewIsolationController {
       if (event.key !== "Enter" && !opensWithArrow) {
         return;
       }
+      if (isNativeFolderItem(view.tree?.focusedItem)) {
+        this.cancelLeafRestore(leaf);
+        return;
+      }
       const path = getItemPath(view.tree?.focusedItem)
         ?? filePathFromTarget(view.containerEl.ownerDocument.activeElement);
       if (path) {
         this.beginFileOpenInteraction(leaf, path);
       }
     };
-    const onClick = () => this.scheduleRemember(leaf);
-    const onKeyUp = () => this.scheduleRemember(leaf);
+    const onClick = (event: MouseEvent) => this.scheduleRemember(leaf, isFolderTarget(event.target));
+    const onKeyUp = (event: KeyboardEvent) => this.scheduleRemember(leaf, isFolderTarget(event.target));
     const navigator = getExplorerNavigator(view);
-    const onScroll = () => this.scheduleRemember(leaf);
+    const onScroll = () => this.rememberScrollPosition(leaf);
+    const onWheel = () => this.cancelLeafRestore(leaf);
 
     view.containerEl.addEventListener("pointerdown", onPointerDown, true);
     view.containerEl.addEventListener("keydown", onKeyDown, true);
     view.containerEl.addEventListener("click", onClick, true);
     view.containerEl.addEventListener("keyup", onKeyUp, true);
+    view.containerEl.addEventListener("wheel", onWheel, true);
     navigator?.addEventListener("scroll", onScroll, { passive: true });
     this.cleanups.set(view.containerEl, () => {
       view.containerEl.removeEventListener("pointerdown", onPointerDown, true);
       view.containerEl.removeEventListener("keydown", onKeyDown, true);
       view.containerEl.removeEventListener("click", onClick, true);
       view.containerEl.removeEventListener("keyup", onKeyUp, true);
+      view.containerEl.removeEventListener("wheel", onWheel, true);
       navigator?.removeEventListener("scroll", onScroll);
     });
   }
 
-  private scheduleRemember(leaf: WorkspaceLeaf): void {
+  private scheduleRemember(leaf: WorkspaceLeaf, waitForTreeSettle = false): void {
     const leafId = getLeafId(leaf);
-    if (!leafId || this.scheduledLeaves.has(leafId)) {
+    if (!leafId || this.restoringLeaves.has(leafId) || this.scheduledLeaves.has(leafId)) {
       return;
     }
     this.scheduledLeaves.add(leafId);
-    queueMicrotask(() => {
+    const capture = () => {
       this.scheduledLeaves.delete(leafId);
-      if (this.getLeavesById().has(leafId)) {
+      if (!this.restoringLeaves.has(leafId) && this.getLeavesById().has(leafId)) {
         this.rememberLeaf(leaf);
       }
+    };
+    queueMicrotask(() => {
+      if (waitForTreeSettle) {
+        void waitForAnimationFrames(2).then(capture);
+      } else {
+        capture();
+      }
     });
+  }
+
+  private rememberScrollPosition(leaf: WorkspaceLeaf): void {
+    const leafId = getLeafId(leaf);
+    if (!leafId || this.restoringLeaves.has(leafId)) {
+      return;
+    }
+    const current = this.states.get(leafId) ?? captureExplorerIsolationState(leaf);
+    const view = getSelectionView(leaf);
+    const scrollTop = view ? getExplorerNavigator(view)?.scrollTop : undefined;
+    if (scrollTop === undefined || !Number.isFinite(scrollTop)) {
+      return;
+    }
+    this.states.set(leafId, {
+      ...current,
+      scrollTop,
+    });
+    this.revisions.set(leafId, (this.revisions.get(leafId) ?? 0) + 1);
   }
 
   private captureCurrentStates(): void {
     for (const leaf of this.getLeavesById().values()) {
       const leafId = getLeafId(leaf);
-      if (leafId) {
+      if (leafId && !this.restoringLeaves.has(leafId)) {
         this.states.set(leafId, captureExplorerIsolationState(leaf));
       }
     }
@@ -670,10 +822,10 @@ export class ExplorerViewIsolationController {
       }
 
       if (desired) {
-        const report = restoreExplorerIsolationState(leaf, desired);
-        this.logUnsupported(leafId, report);
+        this.restoreLeafState(leaf, desired);
+      } else {
+        this.states.set(leafId, captureExplorerIsolationState(leaf));
       }
-      this.states.set(leafId, captureExplorerIsolationState(leaf));
     }
     if (pending) {
       this.restoreSuppressedAutoRevealIfIdle();
@@ -750,6 +902,46 @@ export class ExplorerViewIsolationController {
       this.log("selection.unsupported", { leafId, missingPaths: report.missingPaths });
     }
   }
+
+  private restoreLeafState(leaf: WorkspaceLeaf, snapshot: ExplorerIsolationSnapshot): void {
+    const leafId = getLeafId(leaf);
+    if (!leafId) {
+      return;
+    }
+    if (this.restoringLeaves.has(leafId) && this.activeRestoreSnapshots.get(leafId) === snapshot) {
+      return;
+    }
+    this.cancelLeafRestore(leaf);
+    const generation = (this.restoreGenerations.get(leafId) ?? 0) + 1;
+    this.restoreGenerations.set(leafId, generation);
+    this.restoringLeaves.add(leafId);
+    this.activeRestoreSnapshots.set(leafId, snapshot);
+    const task = beginRestoreExplorerIsolationState(leaf, snapshot);
+    const finish = (report: NativeExplorerSelectionRestoreReport) => {
+      if (this.restoreGenerations.get(leafId) !== generation || !this.getLeavesById().has(leafId)) {
+        return;
+      }
+      this.restoringLeaves.delete(leafId);
+      this.activeRestoreSnapshots.delete(leafId);
+      this.logUnsupported(leafId, report);
+      this.states.set(leafId, captureExplorerIsolationState(leaf));
+    };
+    if (task.pending) {
+      void task.settled.then(finish);
+      return;
+    }
+    finish(task.report as NativeExplorerSelectionRestoreReport);
+  }
+
+  private cancelLeafRestore(leaf: WorkspaceLeaf): void {
+    const leafId = getLeafId(leaf);
+    if (!leafId) {
+      return;
+    }
+    this.restoreGenerations.set(leafId, (this.restoreGenerations.get(leafId) ?? 0) + 1);
+    this.restoringLeaves.delete(leafId);
+    this.activeRestoreSnapshots.delete(leafId);
+  }
 }
 
 function getSelectionView(leaf: WorkspaceLeaf | undefined): NativeExplorerView | null {
@@ -767,23 +959,84 @@ function captureExplorerIsolationState(leaf: WorkspaceLeaf): ExplorerIsolationSn
   };
 }
 
-function restoreExplorerIsolationState(
+function beginRestoreExplorerIsolationState(
   leaf: WorkspaceLeaf,
   snapshot: ExplorerIsolationSnapshot,
-): NativeExplorerSelectionRestoreReport {
+): ExplorerIsolationRestoreTask {
   const view = getSelectionView(leaf);
-  restoreNativeExplorerFolders(view, snapshot.folders);
-  const report = restoreNativeExplorerSelection(leaf, snapshot.selection);
-  const navigator = view ? getExplorerNavigator(view) : null;
-  if (navigator && Number.isFinite(snapshot.scrollTop)) {
-    navigator.scrollTop = snapshot.scrollTop;
+  const folderTask = startNativeExplorerFolderRestore(view, snapshot.folders);
+  const applySelectionAndScroll = (): NativeExplorerSelectionRestoreReport => {
+    const report = restoreNativeExplorerSelection(leaf, snapshot.selection);
+    const navigator = view ? getExplorerNavigator(view) : null;
+    if (navigator && Number.isFinite(snapshot.scrollTop)) {
+      navigator.scrollTop = snapshot.scrollTop;
+    }
+    return report;
+  };
+
+  if (!folderTask.pending) {
+    const report = applySelectionAndScroll();
+    return {
+      pending: false,
+      report,
+      settled: Promise.resolve(report),
+    };
   }
-  return report;
+
+  const settled = folderTask.settled.then(async () => {
+    await waitForAnimationFrames(2);
+    return applySelectionAndScroll();
+  });
+  return {
+    pending: true,
+    report: null,
+    settled,
+  };
 }
 
 function getExplorerNavigator(view: NativeExplorerView): HTMLElement | null {
   const navigator = view.navFileContainerEl ?? view.containerEl;
   return isHtmlElement(navigator) ? navigator : null;
+}
+
+function captureNativeFolderItems(
+  view: NativeExplorerView | null | undefined,
+): NativeExplorerFolderSnapshot[] {
+  const fileItems = view?.fileItems;
+  if (!fileItems) {
+    return [];
+  }
+  const folders: NativeExplorerFolderSnapshot[] = [];
+  for (const [path, item] of Object.entries(fileItems)) {
+    if (!isNativeFolderItem(item)) {
+      continue;
+    }
+    const folderPath = item.file?.path ?? path;
+    if (folderPath) {
+      folders.push({ path: folderPath, collapsed: item.collapsed });
+    }
+  }
+  return folders;
+}
+
+function getFolderItem(view: NativeExplorerView, path: string): NativeExplorerTreeItem | null {
+  const item = view.fileItems?.[path];
+  return isNativeFolderItem(item) ? item : null;
+}
+
+function isNativeFolderItem(value: unknown): value is NativeExplorerTreeItem & { collapsed: boolean } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as NativeExplorerTreeItem;
+  const file = item.file as unknown as { children?: unknown } | undefined;
+  return typeof item.collapsed === "boolean" && Array.isArray(file?.children);
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return Boolean(value)
+    && (typeof value === "object" || typeof value === "function")
+    && typeof (value as { then?: unknown }).then === "function";
 }
 
 function getFolderTitle(folder: HTMLElement): HTMLElement | null {
@@ -843,6 +1096,23 @@ function filePathFromTarget(target: EventTarget | null): string | null {
   const element = asHtmlElement(target);
   const fileTitle = element?.closest<HTMLElement>(".nav-file-title");
   return fileTitle?.dataset.path ?? null;
+}
+
+function isFolderTarget(target: EventTarget | null): boolean {
+  return Boolean(asHtmlElement(target)?.closest<HTMLElement>(".nav-folder-title"));
+}
+
+function waitForAnimationFrames(count: number): Promise<void> {
+  if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+    return Promise.resolve();
+  }
+  let promise = Promise.resolve();
+  for (let index = 0; index < count; index += 1) {
+    promise = promise.then(() => new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    }));
+  }
+  return promise;
 }
 
 function getLeafId(leaf: WorkspaceLeaf): string {
